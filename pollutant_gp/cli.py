@@ -27,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nc-file",
         type=Path,
+        # TODO: Remove the default path and make this a required argument once the user is expected to provide their own data.
+        default=Path("CMEMS_S1_01_conc_grid_10m.nc"),
         help="Path to the NetCDF file used for reconstruction.",
     )
     parser.add_argument(
@@ -187,5 +189,20 @@ def parse_args() -> argparse.Namespace:
         "--show",
         action="store_true",
         help="Show the figure interactively in addition to saving it.",
+    )
+    parser.add_argument(
+        "--sample-size-study",
+        action="store_true",
+        help="Run the GP for multiple sample counts and plot metrics vs n_samples.",
+    )
+    parser.add_argument(
+        "--sample-size-study-counts",
+        type=int,
+        nargs="+",
+        default=[10, 25, 50, 100, 200, 400, 800],
+        help=(
+            "List of sample counts used in the sample size study. "
+            "Example: --sample-size-study-counts 10 50 100 200"
+        ),
     )
     return parser.parse_args()

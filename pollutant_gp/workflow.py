@@ -29,7 +29,7 @@ from pollutant_gp.reconstruction import reconstruct_field
 from pollutant_gp.sampling import sample_sensor_points
 
 # Visualization utilities
-from pollutant_gp.visualization import plot_reconstruction
+from pollutant_gp.visualization import plot_reconstruction, plot_sample_size_study
 
 # Convert optional CLI string values into Python None.
 def optional_name(value: str | None) -> str | None:
@@ -207,3 +207,67 @@ def run_workflow(args: argparse.Namespace) -> None:
         show=args.show,
     )
     print(f"\nSaved figure: {figure_path}")
+
+    # --- Optional sample size study ---
+    if args.sample_size_study:
+        run_sample_size_study(args, grid_data, figure_path)
+
+
+# Run the GP pipeline for multiple sample counts and plot reconstruction metrics vs n_samples.
+def run_sample_size_study(
+    args: argparse.Namespace,
+    grid_data,
+    figure_path: Path,
+) -> None:
+    sample_counts = list(args.sample_size_study_counts)
+    rmse_list, mae_list, r2_list, valid_counts = [], [], [], []
+
+    print("\n=== Sample size study ===")
+    for n in sample_counts:
+        print(f"  n_samples={n} ...", end=" ", flush=True)
+        try:
+            sample_coordinates, sample_values, _ = sample_sensor_points(
+                grid_data=grid_data,
+                n_samples=n,
+                noise_std=args.noise_std,
+                random_seed=args.random_seed,
+            )
+            model, coordinate_scaler = fit_gaussian_process(
+                sample_coordinates=sample_coordinates,
+                sample_values=sample_values,
+                kernel_mode=args.kernel_mode,
+                length_scale_lower_bound=args.length_scale_lower_bound,
+                length_scale_upper_bound=args.length_scale_upper_bound,
+                noise_level_initial=args.noise_level_initial,
+                noise_level_lower_bound=args.noise_level_lower_bound,
+                noise_level_upper_bound=args.noise_level_upper_bound,
+                target_transform=args.target_transform,
+                n_restarts=args.n_restarts,
+                random_seed=args.random_seed,
+            )
+            reconstruction = reconstruct_field(
+                grid_data=grid_data,
+                model=model,
+                coordinate_scaler=coordinate_scaler,
+                batch_size=args.prediction_batch_size,
+                target_transform=args.target_transform,
+                clip_negative=args.clip_negative,
+            )
+            rmse_list.append(reconstruction.rmse)
+            mae_list.append(reconstruction.mae)
+            r2_list.append(reconstruction.r2)
+            valid_counts.append(n)
+            print(f"RMSE={reconstruction.rmse:.6g}  R^2={reconstruction.r2:.4f}")
+        except ValueError as exc:
+            print(f"skipped ({exc})")
+
+    study_path = figure_path.parent / f"{figure_path.stem}_sample_size_study.png"
+    plot_sample_size_study(
+        n_samples_list=valid_counts,
+        rmse_list=rmse_list,
+        mae_list=mae_list,
+        r2_list=r2_list,
+        output_path=study_path,
+        show=args.show,
+    )
+    print(f"Saved sample size study: {study_path}")

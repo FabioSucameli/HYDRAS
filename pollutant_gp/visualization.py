@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -79,5 +80,38 @@ def plot_reconstruction(
     if show:
         plt.show()
 
+    plt.close(fig)
+
+
+# Curve of reconstruction error metrics as a function of the number of sensor samples.
+# Runs the full GP pipeline for each sample count in n_samples_list and plots RMSE, MAE, R^2.
+def plot_sample_size_study(
+    n_samples_list: Sequence[int],
+    rmse_list: Sequence[float],
+    mae_list: Sequence[float],
+    r2_list: Sequence[float],
+    output_path: Path,
+    show: bool,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
+
+    for ax, values, label, color in zip(
+        axes,
+        [rmse_list, mae_list, r2_list],
+        ["RMSE", "MAE", "R²"],
+        ["steelblue", "darkorange", "seagreen"],
+    ):
+        ax.plot(n_samples_list, values, "o-", color=color, linewidth=1.5, markersize=5)
+        ax.set_xlabel("Number of sensor samples")
+        ax.set_ylabel(label)
+        ax.set_title(f"{label} vs number of samples")
+        ax.grid(True, linestyle="--", alpha=0.5)
+
+    fig.suptitle("Sample size study: reconstruction quality vs sensor count")
+    fig.savefig(output_path, dpi=200)
+    if show:
+        plt.show()
     plt.close(fig)
 
