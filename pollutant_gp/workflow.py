@@ -29,7 +29,12 @@ from pollutant_gp.reconstruction import reconstruct_field
 from pollutant_gp.sampling import sample_sensor_points
 
 # Visualization utilities
-from pollutant_gp.visualization import plot_reconstruction, plot_sample_size_study
+from pollutant_gp.visualization import (
+    plot_reconstruction,
+    plot_reconstruction_panels,
+    plot_sample_size_study,
+    plot_sample_size_study_panels,
+)
 
 # Convert optional CLI string values into Python None.
 def optional_name(value: str | None) -> str | None:
@@ -207,6 +212,16 @@ def run_workflow(args: argparse.Namespace) -> None:
         show=args.show,
     )
     print(f"\nSaved figure: {figure_path}")
+    panel_paths = plot_reconstruction_panels(
+        grid_data=grid_data,
+        reconstruction=reconstruction,
+        sample_coordinates=sample_coordinates,
+        output_path=figure_path,
+        show=args.show,
+    )
+    print("Saved separate reconstruction panels:")
+    for panel_path in panel_paths:
+        print(f"  - {panel_path}")
 
     # --- Optional sample size study ---
     if args.sample_size_study:
@@ -271,3 +286,14 @@ def run_sample_size_study(
         show=args.show,
     )
     print(f"Saved sample size study: {study_path}")
+    study_panel_paths = plot_sample_size_study_panels(
+        n_samples_list=valid_counts,
+        rmse_list=rmse_list,
+        mae_list=mae_list,
+        r2_list=r2_list,
+        output_path=study_path,
+        show=args.show,
+    )
+    print("Saved separate sample size study panels:")
+    for panel_path in study_panel_paths:
+        print(f"  - {panel_path}")
