@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--print-dataset",
         action="store_true",
-        help="Print the full dataset structure and exit.",
+        help="Print the full dataset structure, save the valid-domain map, and exit.",
     )
     parser.add_argument(
         "--nc-file",
@@ -203,6 +203,21 @@ def parse_args() -> argparse.Namespace:
         help=(
             "List of sample counts used in the sample size study. "
             "Example: --sample-size-study-counts 10 50 100 200"
+        ),
+    )
+    parser.add_argument(
+        "--sample-size-study-multiseed",
+        action="store_true",
+        help="Run the sample size study over multiple random seeds and plot mean +/- 1 std.",
+    )
+    parser.add_argument(
+        "--sample-size-study-seeds",
+        type=int,
+        nargs="+",
+        default=[7, 42, 123, 256, 512],
+        help=(
+            "List of random seeds used in the multi-seed sample size study. "
+            "Example: --sample-size-study-seeds 7 42 123"
         ),
     )
     return parser.parse_args()

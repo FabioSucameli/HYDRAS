@@ -7,14 +7,15 @@ from typing import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import BoundaryNorm, ListedColormap
 
 from pollutant_gp.types import GridData, ReconstructionResult
 
-
+# Helper function to generate output paths for individual panels.
 def _panel_output_path(output_path: Path, suffix: str) -> Path:
     return output_path.with_name(f"{output_path.stem}_{suffix}{output_path.suffix}")
 
-
+# Prepare the data arrays and shared color limits for the 2x2 reconstruction panel plot.
 def _reconstruction_panel_data(
     grid_data: GridData,
     reconstruction: ReconstructionResult,
@@ -30,7 +31,7 @@ def _reconstruction_panel_data(
 
     return truth, prediction, uncertainty, absolute_error, shared_vmin, shared_vmax
 
-
+# Draw a single spatial panel with the given data and formatting. Optionally overlay sample locations.
 def _draw_spatial_panel(
     axis: plt.Axes,
     grid_data: GridData,
@@ -68,6 +69,42 @@ def _draw_spatial_panel(
         axis.legend(loc="upper right")
 
     return mesh
+
+# Plot the valid domain mask as a binary colormap, with a legend for land vs sea.
+def plot_valid_domain(
+    grid_data: GridData,
+    output_path: Path,
+    show: bool,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    domain = np.where(grid_data.valid_mask, 1.0, 0.0)
+    cmap = ListedColormap(["#f2f2f2", "#2f80ed"])
+    norm = BoundaryNorm([-0.5, 0.5, 1.5], cmap.N)
+
+    fig, axis = plt.subplots(figsize=(8, 6), constrained_layout=True)
+    mesh = axis.pcolormesh(
+        grid_data.x_grid,
+        grid_data.y_grid,
+        domain,
+        shading="auto",
+        cmap=cmap,
+        norm=norm,
+    )
+    axis.set_title("Valid marine domain")
+    axis.set_xlabel(grid_data.x_dim)
+    axis.set_ylabel(grid_data.y_dim)
+    axis.set_aspect("equal", adjustable="box")
+
+    colorbar = fig.colorbar(mesh, ax=axis, ticks=[0, 1])
+    colorbar.ax.set_yticklabels(["NaN / land", "Finite / sea"])
+
+    fig.savefig(output_path, dpi=220)
+
+    if show:
+        plt.show()
+
+    plt.close(fig)
 
 
 # Generate a 2x2 panel plot showing the ground truth, GP reconstruction, predictive uncertainty, and absolute error.
@@ -113,7 +150,7 @@ def plot_reconstruction(
 
     plt.close(fig)
 
-
+# Generate separate panel plots for each of the reconstruction metrics.
 def plot_reconstruction_panels(
     grid_data: GridData,
     reconstruction: ReconstructionResult,
@@ -192,7 +229,7 @@ def plot_sample_size_study(
     for ax, values, label, color in zip(
         axes,
         [rmse_list, mae_list, r2_list],
-        ["RMSE", "MAE", "R2"],
+        ["RMSE", "MAE", "R²"],
         ["steelblue", "darkorange", "seagreen"],
     ):
         ax.plot(n_samples_list, values, "o-", color=color, linewidth=1.5, markersize=5)
@@ -221,7 +258,7 @@ def plot_sample_size_study_panels(
     metrics = [
         ("RMSE", rmse_list, "steelblue", "rmse"),
         ("MAE", mae_list, "darkorange", "mae"),
-        ("R2", r2_list, "seagreen", "r2"),
+        ("R²", r2_list, "seagreen", "r2"),
     ]
 
     saved_paths = []
@@ -238,6 +275,110 @@ def plot_sample_size_study_panels(
         if show:
             plt.show()
 
+        plt.close(fig)
+        saved_paths.append(panel_path)
+
+    return saved_paths
+
+
+# Multi-seed sample size study
+
+# Plot the sample size study averaged over multiple random seeds.
+# For each metric, draws the mean curve with a shaded ±1 std band and individual seed curves.
+def plot_sample_size_study_multiseed(
+    n_samples_list: Sequence[int],
+    rmse_matrix: np.ndarray,
+    mae_matrix: np.ndarray,
+    r2_matrix: np.ndarray,
+    output_path: Path,
+    show: bool,
+) -> None:
+    """
+    Parameters
+    ----------
+    rmse_matrix, mae_matrix, r2_matrix : np.ndarray, shape (n_seeds, n_counts)
+        One row per seed, one column per sample count.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x = np.asarray(n_samples_list)
+    n_seeds = rmse_matrix.shape[0]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
+    metrics = [
+        ("RMSE", rmse_matrix, "steelblue"),
+        ("MAE",  mae_matrix,  "darkorange"),
+        ("R²",   r2_matrix,   "seagreen"),
+    ]
+
+    for ax, (label, matrix, color) in zip(axes, metrics):
+        mean = matrix.mean(axis=0)
+        std  = matrix.std(axis=0)
+
+        for row in matrix:
+            ax.plot(x, row, color=color, alpha=0.20, linewidth=0.8)
+
+        ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.25, label="±1 std")
+        ax.plot(x, mean, "o-", color=color, linewidth=2.0, markersize=6,
+                label=f"Mean ({n_seeds} seeds)")
+
+        ax.set_xlabel("Number of sensor samples")
+        ax.set_ylabel(label)
+        ax.set_title(f"{label} vs number of samples")
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=8)
+
+    fig.suptitle(f"Sample size study — {n_seeds} random seeds  |  mean ± 1 std")
+    fig.savefig(output_path, dpi=200)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+# Same as above but saves one figure per metric.
+def plot_sample_size_study_multiseed_panels(
+    n_samples_list: Sequence[int],
+    rmse_matrix: np.ndarray,
+    mae_matrix: np.ndarray,
+    r2_matrix: np.ndarray,
+    output_path: Path,
+    show: bool,
+) -> list[Path]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x = np.asarray(n_samples_list)
+    n_seeds = rmse_matrix.shape[0]
+
+    metrics = [
+        ("RMSE", rmse_matrix, "steelblue",  "rmse"),
+        ("MAE",  mae_matrix,  "darkorange", "mae"),
+        ("R²",   r2_matrix,   "seagreen",   "r2"),
+    ]
+
+    saved_paths = []
+    for label, matrix, color, suffix in metrics:
+        mean = np.nanmean(matrix, axis=0)
+        std = np.nanstd(matrix, axis=0)
+
+        panel_path = _panel_output_path(output_path, f"multiseed_{suffix}")
+        fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
+
+        for row in matrix:
+            ax.plot(x, row, color=color, alpha=0.20, linewidth=0.8)
+
+        ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.25, label="±1 std")
+        ax.plot(x, mean, "o-", color=color, linewidth=2.0, markersize=6,
+                label=f"Mean ({n_seeds} seeds)")
+
+        ax.set_xlabel("Number of sensor samples")
+        ax.set_ylabel(label)
+        ax.set_title(f"{label} vs number of samples  [{n_seeds} seeds]")
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+
+        fig.savefig(panel_path, dpi=220)
+        if show:
+            plt.show()
         plt.close(fig)
         saved_paths.append(panel_path)
 

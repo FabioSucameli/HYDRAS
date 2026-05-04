@@ -34,6 +34,9 @@ from pollutant_gp.visualization import (
     plot_reconstruction_panels,
     plot_sample_size_study,
     plot_sample_size_study_panels,
+    plot_sample_size_study_multiseed,
+    plot_sample_size_study_multiseed_panels,
+    plot_valid_domain,
 )
 
 # Convert optional CLI string values into Python None.
@@ -62,6 +65,19 @@ def make_output_figure_path(
     file_name = f"{dataset_name}_{time_part}_samples_{n_samples}_{timestamp}.png"
     return output_dir / file_name
 
+
+def make_domain_figure_path(
+    output_dir: Path,
+    nc_file: Path,
+    time_index: int | None,
+) -> Path:
+    dataset_name = nc_file.stem
+    time_part = f"time_{time_index}" if time_index is not None else "no_time"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"{dataset_name}_{time_part}_valid_domain_{timestamp}.png"
+    return output_dir / file_name
+
+
 # Main workflow function
 def run_workflow(args: argparse.Namespace) -> None:
     # Inspection mode: scan NetCDF files and print finite-domain patterns, then exit.
@@ -76,11 +92,58 @@ def run_workflow(args: argparse.Namespace) -> None:
     if not args.nc_file.exists():
         raise FileNotFoundError(f"NetCDF file not found: {args.nc_file}")
 
-    # Dataset structure printing mode: load the specified NetCDF file, print its structure, and exit.
+    # Dataset structure printing mode: print the structure, save a valid-domain map, and exit.
     if args.print_dataset:
         ds = xr.open_dataset(args.nc_file)
-        print(ds)
-        ds.close()
+        try:
+            print_dataset_structure(ds)
+
+            variable_name = args.variable
+            time_dim = optional_name(args.time_dim)
+            y_dim = args.y_dim
+            x_dim = args.x_dim
+            y_coordinate = optional_name(args.y_coordinate)
+            x_coordinate = optional_name(args.x_coordinate)
+
+            try:
+                validate_dataset_layout(
+                    ds=ds,
+                    variable_name=variable_name,
+                    time_dim=time_dim,
+                    y_dim=y_dim,
+                    x_dim=x_dim,
+                    y_coordinate=y_coordinate,
+                    x_coordinate=x_coordinate,
+                )
+
+                data_array = ds[variable_name]
+                time_index = choose_time_index(data_array, time_dim, args.time_index)
+                grid_data = prepare_grid_data(
+                    ds=ds,
+                    variable_name=variable_name,
+                    time_dim=time_dim,
+                    time_index=time_index,
+                    y_dim=y_dim,
+                    x_dim=x_dim,
+                    y_coordinate=y_coordinate,
+                    x_coordinate=x_coordinate,
+                )
+
+                domain_path = make_domain_figure_path(
+                    output_dir=args.output_dir,
+                    nc_file=args.nc_file,
+                    time_index=time_index,
+                )
+                plot_valid_domain(
+                    grid_data=grid_data,
+                    output_path=domain_path,
+                    show=args.show,
+                )
+                print(f"\nSaved valid domain map: {domain_path}")
+            except ValueError as exc:
+                print(f"\nValid domain map was not created: {exc}")
+        finally:
+            ds.close()
         return
     
     # Main workflow: load data, prepare grid, sample sensors, fit GP, reconstruct field, compute metrics, and plot results.
@@ -227,6 +290,10 @@ def run_workflow(args: argparse.Namespace) -> None:
     if args.sample_size_study:
         run_sample_size_study(args, grid_data, figure_path)
 
+    # --- Optional multi-seed sample size study ---
+    if args.sample_size_study_multiseed:
+        run_sample_size_study_multiseed(args, grid_data, figure_path)
+
 
 # Run the GP pipeline for multiple sample counts and plot reconstruction metrics vs n_samples.
 def run_sample_size_study(
@@ -296,4 +363,96 @@ def run_sample_size_study(
     )
     print("Saved separate sample size study panels:")
     for panel_path in study_panel_paths:
+        print(f"  - {panel_path}")
+
+
+# Run the GP pipeline for multiple sample counts AND multiple random seeds.
+# Produces a plot with mean ± 1 std bands across seeds.
+def run_sample_size_study_multiseed(
+    args: argparse.Namespace,
+    grid_data,
+    figure_path: Path,
+) -> None:
+    import warnings
+    from sklearn.exceptions import ConvergenceWarning
+
+    sample_counts = list(args.sample_size_study_counts)
+    seeds = list(args.sample_size_study_seeds)
+
+    # matrices: rows = seeds, columns = sample counts
+    rmse_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
+    mae_matrix  = np.full((len(seeds), len(sample_counts)), np.nan)
+    r2_matrix   = np.full((len(seeds), len(sample_counts)), np.nan)
+
+    print(f"\n=== Multi-seed sample size study ({len(seeds)} seeds × {len(sample_counts)} counts) ===")
+
+    for s_idx, seed in enumerate(seeds):
+        print(f"\n  Seed {seed}:")
+        for n_idx, n in enumerate(sample_counts):
+            print(f"    n_samples={n} ...", end=" ", flush=True)
+            try:
+                sample_coordinates, sample_values, _ = sample_sensor_points(
+                    grid_data=grid_data,
+                    n_samples=n,
+                    noise_std=args.noise_std,
+                    random_seed=seed,
+                )
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                    model, coordinate_scaler = fit_gaussian_process(
+                        sample_coordinates=sample_coordinates,
+                        sample_values=sample_values,
+                        kernel_mode=args.kernel_mode,
+                        length_scale_lower_bound=args.length_scale_lower_bound,
+                        length_scale_upper_bound=args.length_scale_upper_bound,
+                        noise_level_initial=args.noise_level_initial,
+                        noise_level_lower_bound=args.noise_level_lower_bound,
+                        noise_level_upper_bound=args.noise_level_upper_bound,
+                        target_transform=args.target_transform,
+                        n_restarts=args.n_restarts,
+                        random_seed=seed,
+                    )
+                reconstruction = reconstruct_field(
+                    grid_data=grid_data,
+                    model=model,
+                    coordinate_scaler=coordinate_scaler,
+                    batch_size=args.prediction_batch_size,
+                    target_transform=args.target_transform,
+                    clip_negative=args.clip_negative,
+                )
+                rmse_matrix[s_idx, n_idx] = reconstruction.rmse
+                mae_matrix[s_idx, n_idx]  = reconstruction.mae
+                r2_matrix[s_idx, n_idx]   = reconstruction.r2
+                print(f"RMSE={reconstruction.rmse:.6g}  R^2={reconstruction.r2:.4f}")
+            except ValueError as exc:
+                print(f"skipped ({exc})")
+
+    # Drop columns where all seeds failed
+    valid_mask = ~np.all(np.isnan(rmse_matrix), axis=0)
+    valid_counts = [n for n, v in zip(sample_counts, valid_mask) if v]
+    rmse_matrix = rmse_matrix[:, valid_mask]
+    mae_matrix  = mae_matrix[:, valid_mask]
+    r2_matrix   = r2_matrix[:, valid_mask]
+
+    study_path = figure_path.parent / f"{figure_path.stem}_multiseed_study.png"
+    plot_sample_size_study_multiseed(
+        n_samples_list=valid_counts,
+        rmse_matrix=rmse_matrix,
+        mae_matrix=mae_matrix,
+        r2_matrix=r2_matrix,
+        output_path=study_path,
+        show=args.show,
+    )
+    print(f"\nSaved multi-seed study: {study_path}")
+
+    panel_paths = plot_sample_size_study_multiseed_panels(
+        n_samples_list=valid_counts,
+        rmse_matrix=rmse_matrix,
+        mae_matrix=mae_matrix,
+        r2_matrix=r2_matrix,
+        output_path=study_path,
+        show=args.show,
+    )
+    print("Saved separate multi-seed panels:")
+    for panel_path in panel_paths:
         print(f"  - {panel_path}")
