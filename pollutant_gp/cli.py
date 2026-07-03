@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
         help="Print the full dataset structure, save the valid-domain map, and exit.",
     )
     parser.add_argument(
+        "--plot-concentration-map",
+        action="store_true",
+        help="Save a standalone concentration map for the selected time index and exit.",
+    )
+    parser.add_argument(
         "--nc-file",
         type=Path,
         # TODO: Remove the default path and make this a required argument once the user is expected to provide their own data.
@@ -97,6 +102,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Standard deviation of additive Gaussian sensor noise.",
+    )
+    parser.add_argument(
+        "--concentration-display-threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "Values at or below this threshold are hidden in standalone concentration maps, "
+            "leaving the marine-domain background visible."
+        ),
     )
     parser.add_argument(
         "--random-seed",

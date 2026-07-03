@@ -18,6 +18,13 @@ DEFAULT_X_COORDINATE = "x"
 DEFAULT_Y_COORDINATE = "y"
 
 
+def format_time_label(value) -> str:
+    value_array = np.asarray(value)
+    if np.issubdtype(value_array.dtype, np.datetime64):
+        return np.datetime_as_string(value_array, unit="s").replace("T", " ")
+    return str(value)
+
+
 # Print a compact description of the NetCDF dataset.
 def print_dataset_structure(ds: xr.Dataset) -> None:
     print("\n=== Dataset structure ===")
@@ -150,7 +157,7 @@ def prepare_grid_data(
         data_array = data_array.isel({time_dim: time_index})
         time_coord = ds.coords.get(time_dim)
         selected_time_label = (
-            str(time_coord.isel({time_dim: time_index}).values)
+            format_time_label(time_coord.isel({time_dim: time_index}).values)
             if time_coord is not None
             else str(time_index)
         )

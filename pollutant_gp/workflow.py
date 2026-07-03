@@ -30,6 +30,7 @@ from pollutant_gp.sampling import sample_sensor_points
 
 # Visualization utilities
 from pollutant_gp.visualization import (
+    plot_concentration_map,
     plot_reconstruction,
     plot_reconstruction_panels,
     plot_sample_size_study,
@@ -75,6 +76,22 @@ def make_domain_figure_path(
     time_part = f"time_{time_index}" if time_index is not None else "no_time"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"{dataset_name}_{time_part}_valid_domain_{timestamp}.png"
+    return output_dir / file_name
+
+
+def make_concentration_map_path(
+    output_dir: Path,
+    figure_name: str | None,
+    nc_file: Path,
+    time_index: int | None,
+) -> Path:
+    if figure_name:
+        return output_dir / figure_name
+
+    dataset_name = nc_file.stem
+    time_part = f"time_{time_index}" if time_index is not None else "no_time"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"{dataset_name}_{time_part}_concentration_map_{timestamp}.png"
     return output_dir / file_name
 
 
@@ -170,7 +187,7 @@ def run_workflow(args: argparse.Namespace) -> None:
             x_coordinate=x_coordinate,
         )
 
-        # # Extract the concentration variable.
+        # Extract the concentration variable.
         data_array = ds[variable_name]
         time_index = choose_time_index(data_array, time_dim, args.time_index)
 
@@ -204,12 +221,30 @@ def run_workflow(args: argparse.Namespace) -> None:
 
     # Ground-truth field summary statistics
     valid_values = grid_data.field[grid_data.valid_mask]
+    cells_above_threshold = int(np.sum(valid_values > 1.0))
     print("\n=== Selected field summary ===")
     print(f"Field shape: {grid_data.field.shape}")
     print(f"Valid cells: {grid_data.valid_mask.sum()} / {grid_data.valid_mask.size}")
     print(f"Ground-truth min: {np.nanmin(valid_values):.6g}")
     print(f"Ground-truth max: {np.nanmax(valid_values):.6g}")
     print(f"Ground-truth mean: {np.nanmean(valid_values):.6g}")
+    print(f"Cells with concentration > 1: {cells_above_threshold}")
+
+    if args.plot_concentration_map:
+        concentration_map_path = make_concentration_map_path(
+            output_dir=args.output_dir,
+            figure_name=args.figure_name,
+            nc_file=args.nc_file,
+            time_index=time_index,
+        )
+        plot_concentration_map(
+            grid_data=grid_data,
+            output_path=concentration_map_path,
+            show=args.show,
+            display_threshold=args.concentration_display_threshold,
+        )
+        print(f"\nSaved concentration map: {concentration_map_path}")
+        return
 
     # Sample synthetic sensor measurements
     sample_coordinates, sample_values, _ = sample_sensor_points(
@@ -286,11 +321,11 @@ def run_workflow(args: argparse.Namespace) -> None:
     for panel_path in panel_paths:
         print(f"  - {panel_path}")
 
-    # --- Optional sample size study ---
+    # Optional sample size study
     if args.sample_size_study:
         run_sample_size_study(args, grid_data, figure_path)
 
-    # --- Optional multi-seed sample size study ---
+    # Optional multi-seed sample size study
     if args.sample_size_study_multiseed:
         run_sample_size_study_multiseed(args, grid_data, figure_path)
 

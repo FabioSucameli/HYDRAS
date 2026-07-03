@@ -66,7 +66,7 @@ def _draw_spatial_panel(
             linewidths=0.5,
             label="Synthetic sensors",
         )
-        axis.legend(loc="upper right")
+        axis.legend(loc="upper right", fontsize=9)
 
     return mesh
 
@@ -98,6 +98,84 @@ def plot_valid_domain(
 
     colorbar = fig.colorbar(mesh, ax=axis, ticks=[0, 1])
     colorbar.ax.set_yticklabels(["NaN / land", "Finite / sea"])
+
+    fig.savefig(output_path, dpi=220)
+
+    if show:
+        plt.show()
+
+    plt.close(fig)
+
+
+# Plot a standalone concentration map for dataset inspection and report figures.
+def plot_concentration_map(
+    grid_data: GridData,
+    output_path: Path,
+    show: bool,
+    display_threshold: float = 0.0,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    field = np.where(grid_data.valid_mask, grid_data.field, np.nan)
+    visible_concentration = np.where(field > display_threshold, field, np.nan)
+    finite_values = field[np.isfinite(field)]
+    vmax = float(np.nanmax(finite_values))
+
+    domain = np.where(grid_data.valid_mask, 1.0, 0.0)
+    domain_cmap = ListedColormap(["white", "#86cce3"])
+    domain_norm = BoundaryNorm([-0.5, 0.5, 1.5], domain_cmap.N)
+
+    concentration_cmap = plt.get_cmap("YlOrRd").copy()
+    concentration_cmap.set_bad((0.0, 0.0, 0.0, 0.0))
+
+    fig, axis = plt.subplots(figsize=(9, 7), constrained_layout=True)
+
+    axis.pcolormesh(
+        grid_data.x_grid,
+        grid_data.y_grid,
+        domain,
+        shading="auto",
+        cmap=domain_cmap,
+        norm=domain_norm,
+    )
+    mesh = axis.pcolormesh(
+        grid_data.x_grid,
+        grid_data.y_grid,
+        visible_concentration,
+        shading="auto",
+        cmap=concentration_cmap,
+        vmin=0.0,
+        vmax=vmax,
+    )
+
+    if finite_values.size:
+        max_flat_index = int(np.nanargmax(field))
+        max_y_index, max_x_index = np.unravel_index(max_flat_index, field.shape)
+        axis.scatter(
+            grid_data.x_grid[max_y_index, max_x_index],
+            grid_data.y_grid[max_y_index, max_x_index],
+            marker="*",
+            s=120,
+            c="yellow",
+            edgecolors="black",
+            linewidths=0.8,
+            label="Maximum concentration",
+            zorder=5,
+        )
+        axis.legend(loc="upper right")
+
+    title_parts = ["Concentration field"]
+    if grid_data.selected_time_label is not None:
+        title_parts.append(f"time = {grid_data.selected_time_label}")
+    if display_threshold > 0.0:
+        title_parts.append(f"display threshold = {display_threshold:g}")
+    axis.set_title(" | ".join(title_parts), fontsize=11)
+    axis.set_xlabel(f"{grid_data.x_dim} (m)")
+    axis.set_ylabel(f"{grid_data.y_dim} (m)")
+    axis.set_aspect("equal", adjustable="box")
+
+    colorbar = fig.colorbar(mesh, ax=axis)
+    colorbar.set_label("Concentration")
 
     fig.savefig(output_path, dpi=220)
 
@@ -293,12 +371,7 @@ def plot_sample_size_study_multiseed(
     output_path: Path,
     show: bool,
 ) -> None:
-    """
-    Parameters
-    ----------
-    rmse_matrix, mae_matrix, r2_matrix : np.ndarray, shape (n_seeds, n_counts)
-        One row per seed, one column per sample count.
-    """
+  
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     x = np.asarray(n_samples_list)
