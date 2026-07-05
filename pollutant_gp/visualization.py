@@ -31,6 +31,12 @@ def _reconstruction_panel_data(
 
     return truth, prediction, uncertainty, absolute_error, shared_vmin, shared_vmax
 
+
+# Compute a plotting standard deviation that also works with a single seed.
+def _std_for_plot(matrix: np.ndarray) -> np.ndarray:
+    ddof = 1 if matrix.shape[0] > 1 else 0
+    return np.nanstd(matrix, axis=0, ddof=ddof)
+
 # Draw a single spatial panel with the given data and formatting. Optionally overlay sample locations.
 def _draw_spatial_panel(
     axis: plt.Axes,
@@ -448,6 +454,123 @@ def plot_sample_size_study_multiseed_panels(
         ax.set_title(f"{label} vs number of samples  [{n_seeds} seeds]")
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=9)
+
+        fig.savefig(panel_path, dpi=220)
+        if show:
+            plt.show()
+        plt.close(fig)
+        saved_paths.append(panel_path)
+
+    return saved_paths
+
+
+# Plot a multi-model kernel comparison using mean curves and +/- 1 std error bars.
+def plot_kernel_comparison_multiseed(
+    n_samples_list: Sequence[int],
+    results_by_model: dict[str, dict[str, np.ndarray]],
+    output_path: Path,
+    show: bool,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x = np.asarray(n_samples_list)
+    colors = {
+        "Isotropic": "steelblue",
+        "Axis-aligned anisotropic": "darkorange",
+        "Wind-informed anisotropic": "seagreen",
+    }
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 10), constrained_layout=True)
+    metrics = [
+        ("rmse", "RMSE", "RMSE vs number of sensors"),
+        ("r2", "R2", "R2 vs number of sensors"),
+    ]
+
+    for axis, (metric_key, ylabel, title) in zip(axes, metrics):
+        for label, model_results in results_by_model.items():
+            matrix = model_results[metric_key]
+            mean = np.nanmean(matrix, axis=0)
+            std = _std_for_plot(matrix)
+            color = colors.get(label, None)
+
+            axis.errorbar(
+                x,
+                mean,
+                yerr=std,
+                color=color,
+                marker="o",
+                linestyle="-",
+                linewidth=2.2,
+                markersize=6,
+                capsize=4,
+                elinewidth=1.6,
+                label=label,
+            )
+
+        axis.set_xlabel("Synthetic sensors")
+        axis.set_ylabel(ylabel)
+        axis.set_title(title)
+        axis.grid(True, linestyle="-", alpha=0.25)
+        axis.legend(fontsize=9, loc="best")
+
+    fig.suptitle("CL02_V1_SRC131, time index 729: kernel comparison over random seeds")
+    fig.set_constrained_layout_pads(h_pad=0.08, hspace=0.08)
+    fig.savefig(output_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+# Save separate RMSE and R2 panels for the multi-model kernel comparison.
+def plot_kernel_comparison_multiseed_panels(
+    n_samples_list: Sequence[int],
+    results_by_model: dict[str, dict[str, np.ndarray]],
+    output_path: Path,
+    show: bool,
+) -> list[Path]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x = np.asarray(n_samples_list)
+    colors = {
+        "Isotropic": "steelblue",
+        "Axis-aligned anisotropic": "darkorange",
+        "Wind-informed anisotropic": "seagreen",
+    }
+    metrics = [
+        ("rmse", "RMSE", "RMSE vs number of sensors", "rmse"),
+        ("r2", "R2", "R2 vs number of sensors", "r2"),
+    ]
+
+    saved_paths = []
+    for metric_key, ylabel, title, suffix in metrics:
+        panel_path = _panel_output_path(output_path, f"kernel_comparison_{suffix}")
+        fig, axis = plt.subplots(figsize=(8, 5.5), constrained_layout=True)
+
+        for label, model_results in results_by_model.items():
+            matrix = model_results[metric_key]
+            mean = np.nanmean(matrix, axis=0)
+            std = _std_for_plot(matrix)
+            color = colors.get(label, None)
+
+            axis.errorbar(
+                x,
+                mean,
+                yerr=std,
+                color=color,
+                marker="o",
+                linestyle="-",
+                linewidth=2.2,
+                markersize=6,
+                capsize=4,
+                elinewidth=1.6,
+                label=label,
+            )
+
+        axis.set_xlabel("Synthetic sensors")
+        axis.set_ylabel(ylabel)
+        axis.set_title(title)
+        axis.grid(True, linestyle="-", alpha=0.25)
+        axis.legend(fontsize=9)
 
         fig.savefig(panel_path, dpi=220)
         if show:

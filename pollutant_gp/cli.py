@@ -259,6 +259,14 @@ def parse_args() -> argparse.Namespace:
         help="Run the sample size study over multiple random seeds and plot mean +/- 1 std.",
     )
     parser.add_argument(
+        "--kernel-comparison-study",
+        action="store_true",
+        help=(
+            "Run a multi-seed comparison between isotropic, axis-aligned anisotropic, "
+            "and wind-informed anisotropic GP kernels."
+        ),
+    )
+    parser.add_argument(
         "--sample-size-study-seeds",
         type=int,
         nargs="+",

@@ -36,6 +36,8 @@ from pollutant_gp.spatial import (
 # Visualization utilities
 from pollutant_gp.visualization import (
     plot_concentration_map,
+    plot_kernel_comparison_multiseed,
+    plot_kernel_comparison_multiseed_panels,
     plot_reconstruction,
     plot_reconstruction_panels,
     plot_sample_size_study,
@@ -101,13 +103,26 @@ def make_concentration_map_path(
     return output_dir / file_name
 
 
-def build_coordinate_transform(
+def make_kernel_comparison_path(
+    output_dir: Path,
+    figure_name: str | None,
+    nc_file: Path,
+    time_index: int | None,
+) -> Path:
+    if figure_name:
+        return output_dir / figure_name
+
+    dataset_name = nc_file.stem
+    time_part = f"time_{time_index}" if time_index is not None else "no_time"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"{dataset_name}_{time_part}_kernel_comparison_{timestamp}.png"
+    return output_dir / file_name
+
+
+def build_wind_coordinate_transform(
     args: argparse.Namespace,
     grid_data,
-) -> RotationTransform | None:
-    if not args.physically_informed:
-        return None
-
+) -> RotationTransform:
     target_time = parse_time_label(grid_data.selected_time_label)
     wind_orientation = compute_wind_orientation(
         path=args.wind_file,
@@ -131,6 +146,18 @@ def build_coordinate_transform(
     print(f"Transport direction TOWARD: {wind_orientation.direction_toward_degrees:.3f} deg")
     print(f"Rotation angle from +x axis: {wind_orientation.math_angle_degrees:.3f} deg")
     print(f"Rotation center: x={transform.center_x:.3f}, y={transform.center_y:.3f}")
+
+    return transform
+
+
+def build_coordinate_transform(
+    args: argparse.Namespace,
+    grid_data,
+) -> RotationTransform | None:
+    if not args.physically_informed:
+        return None
+
+    transform = build_wind_coordinate_transform(args, grid_data)
 
     if args.kernel_mode != "anisotropic":
         print("Note: wind-informed rotations are most meaningful with --kernel-mode anisotropic.")
@@ -245,6 +272,7 @@ def run_workflow(args: argparse.Namespace) -> None:
         print(f"Number of sensor samples: {args.n_samples}")
         print(f"Sensor noise standard deviation: {args.noise_std}")
         print(f"Kernel mode: {args.kernel_mode}")
+        print(f"Kernel comparison study: {args.kernel_comparison_study}")
         print(f"Physically informed rotation: {args.physically_informed}")
         if args.physically_informed:
             print(f"Wind file: {args.wind_file}")
@@ -292,6 +320,16 @@ def run_workflow(args: argparse.Namespace) -> None:
             display_threshold=args.concentration_display_threshold,
         )
         print(f"\nSaved concentration map: {concentration_map_path}")
+        return
+
+    if args.kernel_comparison_study:
+        comparison_path = make_kernel_comparison_path(
+            output_dir=args.output_dir,
+            figure_name=args.figure_name,
+            nc_file=args.nc_file,
+            time_index=time_index,
+        )
+        run_kernel_comparison_study(args, grid_data, comparison_path)
         return
 
     coordinate_transform = build_coordinate_transform(args, grid_data)
@@ -383,6 +421,138 @@ def run_workflow(args: argparse.Namespace) -> None:
     # Optional multi-seed sample size study
     if args.sample_size_study_multiseed:
         run_sample_size_study_multiseed(args, grid_data, figure_path, coordinate_transform)
+
+
+def fit_and_reconstruct_once(
+    args: argparse.Namespace,
+    grid_data,
+    n_samples: int,
+    random_seed: int,
+    kernel_mode: str,
+    coordinate_transform: RotationTransform | None,
+):
+    sample_coordinates, sample_values, _ = sample_sensor_points(
+        grid_data=grid_data,
+        n_samples=n_samples,
+        noise_std=args.noise_std,
+        random_seed=random_seed,
+    )
+    model_sample_coordinates = maybe_transform_coordinates(
+        sample_coordinates,
+        coordinate_transform,
+    )
+    model, coordinate_scaler = fit_gaussian_process(
+        sample_coordinates=model_sample_coordinates,
+        sample_values=sample_values,
+        kernel_mode=kernel_mode,
+        length_scale_lower_bound=args.length_scale_lower_bound,
+        length_scale_upper_bound=args.length_scale_upper_bound,
+        noise_level_initial=args.noise_level_initial,
+        noise_level_lower_bound=args.noise_level_lower_bound,
+        noise_level_upper_bound=args.noise_level_upper_bound,
+        target_transform=args.target_transform,
+        n_restarts=args.n_restarts,
+        random_seed=random_seed,
+    )
+    return reconstruct_field(
+        grid_data=grid_data,
+        model=model,
+        coordinate_scaler=coordinate_scaler,
+        batch_size=args.prediction_batch_size,
+        target_transform=args.target_transform,
+        clip_negative=args.clip_negative,
+        coordinate_transform=coordinate_transform,
+    )
+
+
+def run_kernel_comparison_study(
+    args: argparse.Namespace,
+    grid_data,
+    output_path: Path,
+) -> None:
+    import warnings
+    from sklearn.exceptions import ConvergenceWarning
+
+    sample_counts = list(args.sample_size_study_counts)
+    seeds = list(args.sample_size_study_seeds)
+    wind_transform = build_wind_coordinate_transform(args, grid_data)
+
+    model_configs = [
+        ("Isotropic", "isotropic", None),
+        ("Axis-aligned anisotropic", "anisotropic", None),
+        ("Wind-informed anisotropic", "anisotropic", wind_transform),
+    ]
+
+    print(
+        "\n=== Kernel comparison study "
+        f"({len(model_configs)} models x {len(seeds)} seeds x {len(sample_counts)} counts) ==="
+    )
+
+    results_by_model: dict[str, dict[str, np.ndarray]] = {}
+    for label, kernel_mode, coordinate_transform in model_configs:
+        rmse_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
+        mae_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
+        r2_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
+
+        print(f"\n  Model: {label}")
+        for seed_index, seed in enumerate(seeds):
+            print(f"    Seed {seed}:")
+            for count_index, n_samples in enumerate(sample_counts):
+                print(f"      n_samples={n_samples} ...", end=" ", flush=True)
+                try:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                        reconstruction = fit_and_reconstruct_once(
+                            args=args,
+                            grid_data=grid_data,
+                            n_samples=n_samples,
+                            random_seed=seed,
+                            kernel_mode=kernel_mode,
+                            coordinate_transform=coordinate_transform,
+                        )
+                    rmse_matrix[seed_index, count_index] = reconstruction.rmse
+                    mae_matrix[seed_index, count_index] = reconstruction.mae
+                    r2_matrix[seed_index, count_index] = reconstruction.r2
+                    print(f"RMSE={reconstruction.rmse:.6g}  R^2={reconstruction.r2:.4f}")
+                except ValueError as exc:
+                    print(f"skipped ({exc})")
+
+        results_by_model[label] = {
+            "rmse": rmse_matrix,
+            "mae": mae_matrix,
+            "r2": r2_matrix,
+        }
+
+    print("\n=== Kernel comparison summary ===")
+    for label, model_results in results_by_model.items():
+        print(f"\n  {label}:")
+        for count_index, n_samples in enumerate(sample_counts):
+            rmse_values = model_results["rmse"][:, count_index]
+            r2_values = model_results["r2"][:, count_index]
+            std_ddof = 1 if len(seeds) > 1 else 0
+            print(
+                f"    n_samples={n_samples}: "
+                f"RMSE={np.nanmean(rmse_values):.6g} +/- {np.nanstd(rmse_values, ddof=std_ddof):.6g}, "
+                f"R^2={np.nanmean(r2_values):.6g} +/- {np.nanstd(r2_values, ddof=std_ddof):.6g}"
+            )
+
+    plot_kernel_comparison_multiseed(
+        n_samples_list=sample_counts,
+        results_by_model=results_by_model,
+        output_path=output_path,
+        show=args.show,
+    )
+    print(f"\nSaved kernel comparison study: {output_path}")
+
+    panel_paths = plot_kernel_comparison_multiseed_panels(
+        n_samples_list=sample_counts,
+        results_by_model=results_by_model,
+        output_path=output_path,
+        show=args.show,
+    )
+    print("Saved separate kernel comparison panels:")
+    for panel_path in panel_paths:
+        print(f"  - {panel_path}")
 
 
 # Run the GP pipeline for multiple sample counts and plot reconstruction metrics vs n_samples.
