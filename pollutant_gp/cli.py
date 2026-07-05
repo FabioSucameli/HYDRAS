@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
         "--nc-file",
         type=Path,
         # TODO: Remove the default path and make this a required argument once the user is expected to provide their own data.
-        default=Path("CMEMS_S1_01_conc_grid_10m.nc"),
+        default=Path("CL02_V1_SRC131_Conc_10mGrid.nc"),
         help="Path to the NetCDF file used for reconstruction.",
     )
     parser.add_argument(
@@ -123,6 +123,40 @@ def parse_args() -> argparse.Namespace:
         choices=("anisotropic", "isotropic"),
         default="anisotropic",
         help="Use one length scale per axis or a single shared length scale.",
+    )
+    parser.add_argument(
+        "--physically-informed",
+        "--wind-informed",
+        dest="physically_informed",
+        action="store_true",
+        help=(
+            "Rotate spatial coordinates before GP fitting using the wind forcing direction. "
+            "This is intended for wind-informed anisotropic GP experiments."
+        ),
+    )
+    parser.add_argument(
+        "--wind-file",
+        type=Path,
+        default=Path("CI_WIND_faseII_V1.txt"),
+        help="Path to the wind forcing text file used when --physically-informed is enabled.",
+    )
+    parser.add_argument(
+        "--wind-average-hours",
+        type=float,
+        default=12.0,
+        help=(
+            "Number of hours before the selected timestamp used to compute the mean wind "
+            "transport direction. Use 0 for the instantaneous interpolated wind."
+        ),
+    )
+    parser.add_argument(
+        "--wind-direction-convention",
+        choices=("from", "toward"),
+        default="from",
+        help=(
+            "Interpret wind directions as meteorological 'from' directions or as transport "
+            "'toward' directions."
+        ),
     )
     parser.add_argument(
         "--length-scale-lower-bound",

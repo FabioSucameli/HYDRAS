@@ -8,6 +8,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 
 from pollutant_gp.model import inverse_predictions, predict_in_batches
+from pollutant_gp.spatial import RotationTransform, maybe_transform_coordinates
 from pollutant_gp.types import GridData, ReconstructionResult
 
 # Reconstruct the concentration field on all valid grid cells.
@@ -23,6 +24,7 @@ def reconstruct_field(
     batch_size: int,
     target_transform: str,
     clip_negative: bool,
+    coordinate_transform: RotationTransform | None = None,
 ) -> ReconstructionResult:
     
     # Extract coordinates of valid cells and reshape them into a 2D array of (x, y) pairs for prediction.
@@ -32,6 +34,10 @@ def reconstruct_field(
     
     prediction_coordinates = np.column_stack(
         [x_flat[valid_flat_indices], y_flat[valid_flat_indices]]
+    )
+    prediction_coordinates = maybe_transform_coordinates(
+        prediction_coordinates,
+        coordinate_transform,
     )
     
     # Predict GP mean and standard deviation
@@ -78,4 +84,3 @@ def reconstruct_field(
         mae=float(mae),
         r2=float(r2),
     )
-

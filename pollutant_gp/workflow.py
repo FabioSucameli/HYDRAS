@@ -27,6 +27,11 @@ from pollutant_gp.reconstruction import reconstruct_field
 
 # Synthetic sensor sampling
 from pollutant_gp.sampling import sample_sensor_points
+from pollutant_gp.spatial import (
+    RotationTransform,
+    build_rotation_transform,
+    maybe_transform_coordinates,
+)
 
 # Visualization utilities
 from pollutant_gp.visualization import (
@@ -39,6 +44,7 @@ from pollutant_gp.visualization import (
     plot_sample_size_study_multiseed_panels,
     plot_valid_domain,
 )
+from pollutant_gp.wind import compute_wind_orientation, parse_time_label
 
 # Convert optional CLI string values into Python None.
 def optional_name(value: str | None) -> str | None:
@@ -93,6 +99,43 @@ def make_concentration_map_path(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"{dataset_name}_{time_part}_concentration_map_{timestamp}.png"
     return output_dir / file_name
+
+
+def build_coordinate_transform(
+    args: argparse.Namespace,
+    grid_data,
+) -> RotationTransform | None:
+    if not args.physically_informed:
+        return None
+
+    target_time = parse_time_label(grid_data.selected_time_label)
+    wind_orientation = compute_wind_orientation(
+        path=args.wind_file,
+        target_time=target_time,
+        average_hours=args.wind_average_hours,
+        direction_convention=args.wind_direction_convention,
+    )
+
+    transform = build_rotation_transform(
+        grid_data=grid_data,
+        angle_degrees=wind_orientation.math_angle_degrees,
+        description="wind-informed transport direction",
+    )
+
+    print("\n=== Physically informed coordinate transform ===")
+    print(f"Wind file: {wind_orientation.source_path}")
+    print(f"Target time: {wind_orientation.target_time}")
+    print(f"Averaging window: {wind_orientation.average_hours:g} h")
+    print(f"Wind vector speed: {wind_orientation.vector_speed:.6g}")
+    print(f"Wind direction FROM: {wind_orientation.direction_from_degrees:.3f} deg")
+    print(f"Transport direction TOWARD: {wind_orientation.direction_toward_degrees:.3f} deg")
+    print(f"Rotation angle from +x axis: {wind_orientation.math_angle_degrees:.3f} deg")
+    print(f"Rotation center: x={transform.center_x:.3f}, y={transform.center_y:.3f}")
+
+    if args.kernel_mode != "anisotropic":
+        print("Note: wind-informed rotations are most meaningful with --kernel-mode anisotropic.")
+
+    return transform
 
 
 # Main workflow function
@@ -202,6 +245,11 @@ def run_workflow(args: argparse.Namespace) -> None:
         print(f"Number of sensor samples: {args.n_samples}")
         print(f"Sensor noise standard deviation: {args.noise_std}")
         print(f"Kernel mode: {args.kernel_mode}")
+        print(f"Physically informed rotation: {args.physically_informed}")
+        if args.physically_informed:
+            print(f"Wind file: {args.wind_file}")
+            print(f"Wind averaging window: {args.wind_average_hours:g} h")
+            print(f"Wind direction convention: {args.wind_direction_convention}")
         print(f"Target transform: {args.target_transform}")
         print(f"Clip negative predictions: {args.clip_negative}")
 
@@ -246,6 +294,8 @@ def run_workflow(args: argparse.Namespace) -> None:
         print(f"\nSaved concentration map: {concentration_map_path}")
         return
 
+    coordinate_transform = build_coordinate_transform(args, grid_data)
+
     # Sample synthetic sensor measurements
     sample_coordinates, sample_values, _ = sample_sensor_points(
         grid_data=grid_data,
@@ -257,13 +307,17 @@ def run_workflow(args: argparse.Namespace) -> None:
     print(f"Sample value min: {np.min(sample_values):.6g}")
     print(f"Sample value max: {np.max(sample_values):.6g}")
     print(f"Sample value mean: {np.mean(sample_values):.6g}")
+    model_sample_coordinates = maybe_transform_coordinates(
+        sample_coordinates,
+        coordinate_transform,
+    )
 
     # Train Gaussian Process model
     # The GP learns a mapping from spatial coordinates to concentration: (x, y) -> C
     # using only the sparse synthetic measurements.
     print("\n=== Fitting Gaussian Process ===")
     model, coordinate_scaler = fit_gaussian_process(
-        sample_coordinates=sample_coordinates,
+        sample_coordinates=model_sample_coordinates,
         sample_values=sample_values,
         kernel_mode=args.kernel_mode,
         length_scale_lower_bound=args.length_scale_lower_bound,
@@ -286,6 +340,7 @@ def run_workflow(args: argparse.Namespace) -> None:
         batch_size=args.prediction_batch_size,
         target_transform=args.target_transform,
         clip_negative=args.clip_negative,
+        coordinate_transform=coordinate_transform,
     )
 
     print("\n=== Reconstruction metrics on valid sea cells ===")
@@ -323,11 +378,11 @@ def run_workflow(args: argparse.Namespace) -> None:
 
     # Optional sample size study
     if args.sample_size_study:
-        run_sample_size_study(args, grid_data, figure_path)
+        run_sample_size_study(args, grid_data, figure_path, coordinate_transform)
 
     # Optional multi-seed sample size study
     if args.sample_size_study_multiseed:
-        run_sample_size_study_multiseed(args, grid_data, figure_path)
+        run_sample_size_study_multiseed(args, grid_data, figure_path, coordinate_transform)
 
 
 # Run the GP pipeline for multiple sample counts and plot reconstruction metrics vs n_samples.
@@ -335,6 +390,7 @@ def run_sample_size_study(
     args: argparse.Namespace,
     grid_data,
     figure_path: Path,
+    coordinate_transform: RotationTransform | None,
 ) -> None:
     sample_counts = list(args.sample_size_study_counts)
     rmse_list, mae_list, r2_list, valid_counts = [], [], [], []
@@ -349,8 +405,12 @@ def run_sample_size_study(
                 noise_std=args.noise_std,
                 random_seed=args.random_seed,
             )
+            model_sample_coordinates = maybe_transform_coordinates(
+                sample_coordinates,
+                coordinate_transform,
+            )
             model, coordinate_scaler = fit_gaussian_process(
-                sample_coordinates=sample_coordinates,
+                sample_coordinates=model_sample_coordinates,
                 sample_values=sample_values,
                 kernel_mode=args.kernel_mode,
                 length_scale_lower_bound=args.length_scale_lower_bound,
@@ -369,6 +429,7 @@ def run_sample_size_study(
                 batch_size=args.prediction_batch_size,
                 target_transform=args.target_transform,
                 clip_negative=args.clip_negative,
+                coordinate_transform=coordinate_transform,
             )
             rmse_list.append(reconstruction.rmse)
             mae_list.append(reconstruction.mae)
@@ -407,6 +468,7 @@ def run_sample_size_study_multiseed(
     args: argparse.Namespace,
     grid_data,
     figure_path: Path,
+    coordinate_transform: RotationTransform | None,
 ) -> None:
     import warnings
     from sklearn.exceptions import ConvergenceWarning
@@ -432,10 +494,14 @@ def run_sample_size_study_multiseed(
                     noise_std=args.noise_std,
                     random_seed=seed,
                 )
+                model_sample_coordinates = maybe_transform_coordinates(
+                    sample_coordinates,
+                    coordinate_transform,
+                )
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=ConvergenceWarning)
                     model, coordinate_scaler = fit_gaussian_process(
-                        sample_coordinates=sample_coordinates,
+                        sample_coordinates=model_sample_coordinates,
                         sample_values=sample_values,
                         kernel_mode=args.kernel_mode,
                         length_scale_lower_bound=args.length_scale_lower_bound,
@@ -454,6 +520,7 @@ def run_sample_size_study_multiseed(
                     batch_size=args.prediction_batch_size,
                     target_transform=args.target_transform,
                     clip_negative=args.clip_negative,
+                    coordinate_transform=coordinate_transform,
                 )
                 rmse_matrix[s_idx, n_idx] = reconstruction.rmse
                 mae_matrix[s_idx, n_idx]  = reconstruction.mae
