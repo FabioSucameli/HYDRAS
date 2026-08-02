@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from pollutant_gp.current import compute_current_orientation
 from pollutant_gp.data import (
     choose_time_index,
     prepare_grid_data,
@@ -47,6 +48,23 @@ from pollutant_gp.visualization import (
     plot_valid_domain,
 )
 from pollutant_gp.wind import compute_wind_orientation, parse_time_label
+
+
+# Print how strongly the GP violates non-negativity before clipping.
+def print_positivity_diagnostics(reconstruction) -> None:
+    percentage = 100.0 * reconstruction.negative_prediction_fraction
+    print("\n=== Positivity diagnostics before clipping ===")
+    print(f"Minimum prediction before clipping: {reconstruction.min_prediction_before_clipping:.8g}")
+    print(
+        "Negative predictions before clipping: "
+        f"{reconstruction.negative_prediction_count} "
+        f"({percentage:.4g}% of valid cells)"
+    )
+    if reconstruction.negative_prediction_count > 0:
+        print(f"Mean negative prediction: {reconstruction.mean_negative_prediction:.8g}")
+    else:
+        print("Mean negative prediction: n/a")
+
 
 # Convert optional CLI string values into Python None.
 def optional_name(value: str | None) -> str | None:
@@ -150,6 +168,43 @@ def build_wind_coordinate_transform(
     return transform
 
 
+def build_current_coordinate_transform(
+    args: argparse.Namespace,
+    grid_data,
+) -> RotationTransform:
+    target_time = parse_time_label(grid_data.selected_time_label)
+    current_orientation = compute_current_orientation(
+        path=args.current_file,
+        target_time=target_time,
+        average_hours=args.current_average_hours,
+        u_variable=args.current_u_variable,
+        v_variable=args.current_v_variable,
+        time_dim=args.current_time_dim,
+        valid_mask=grid_data.valid_mask,
+    )
+
+    transform = build_rotation_transform(
+        grid_data=grid_data,
+        angle_degrees=current_orientation.math_angle_degrees,
+        description="current-informed transport direction",
+    )
+
+    print("\n=== Physically informed coordinate transform ===")
+    print(f"Current file: {current_orientation.source_path}")
+    print(f"Target time: {current_orientation.target_time}")
+    print(f"Averaging window: {current_orientation.average_hours:g} h")
+    print(f"Selected current time steps: {current_orientation.selected_time_count}")
+    print(f"Valid current vectors used: {current_orientation.valid_vector_count}")
+    print(f"Mean current u: {current_orientation.mean_u:.6g} m/s")
+    print(f"Mean current v: {current_orientation.mean_v:.6g} m/s")
+    print(f"Mean current vector speed: {current_orientation.vector_speed:.6g} m/s")
+    print(f"Current direction TOWARD: {current_orientation.direction_toward_degrees:.3f} deg")
+    print(f"Rotation angle from +x axis: {current_orientation.math_angle_degrees:.3f} deg")
+    print(f"Rotation center: x={transform.center_x:.3f}, y={transform.center_y:.3f}")
+
+    return transform
+
+
 def build_coordinate_transform(
     args: argparse.Namespace,
     grid_data,
@@ -157,10 +212,15 @@ def build_coordinate_transform(
     if not args.physically_informed:
         return None
 
-    transform = build_wind_coordinate_transform(args, grid_data)
+    if args.physics_source == "wind":
+        transform = build_wind_coordinate_transform(args, grid_data)
+    elif args.physics_source == "current":
+        transform = build_current_coordinate_transform(args, grid_data)
+    else:
+        raise ValueError(f"Unknown physics source: {args.physics_source}")
 
     if args.kernel_mode != "anisotropic":
-        print("Note: wind-informed rotations are most meaningful with --kernel-mode anisotropic.")
+        print("Note: physically informed rotations are most meaningful with --kernel-mode anisotropic.")
 
     return transform
 
@@ -273,11 +333,21 @@ def run_workflow(args: argparse.Namespace) -> None:
         print(f"Sensor noise standard deviation: {args.noise_std}")
         print(f"Kernel mode: {args.kernel_mode}")
         print(f"Kernel comparison study: {args.kernel_comparison_study}")
-        print(f"Physically informed rotation: {args.physically_informed}")
+        if args.kernel_comparison_study:
+            print("Physically informed rotation: evaluated inside the kernel comparison study")
+        else:
+            print(f"Physically informed rotation: {args.physically_informed}")
         if args.physically_informed:
-            print(f"Wind file: {args.wind_file}")
-            print(f"Wind averaging window: {args.wind_average_hours:g} h")
-            print(f"Wind direction convention: {args.wind_direction_convention}")
+            print(f"Physics source: {args.physics_source}")
+            if args.physics_source == "wind":
+                print(f"Wind file: {args.wind_file}")
+                print(f"Wind averaging window: {args.wind_average_hours:g} h")
+                print(f"Wind direction convention: {args.wind_direction_convention}")
+            elif args.physics_source == "current":
+                print(f"Current file: {args.current_file}")
+                print(f"Current averaging window: {args.current_average_hours:g} h")
+                print(f"Current u variable: {args.current_u_variable}")
+                print(f"Current v variable: {args.current_v_variable}")
         print(f"Target transform: {args.target_transform}")
         print(f"Clip negative predictions: {args.clip_negative}")
 
@@ -386,6 +456,7 @@ def run_workflow(args: argparse.Namespace) -> None:
     print(f"RMSE: {reconstruction.rmse:.8g}")
     print(f"MAE:  {reconstruction.mae:.8g}")
     print(f"R^2:  {reconstruction.r2:.8g}")
+    print_positivity_diagnostics(reconstruction)
 
     # Save visualization
     figure_path = make_output_figure_path(
@@ -475,13 +546,20 @@ def run_kernel_comparison_study(
 
     sample_counts = list(args.sample_size_study_counts)
     seeds = list(args.sample_size_study_seeds)
-    wind_transform = build_wind_coordinate_transform(args, grid_data)
 
     model_configs = [
         ("Isotropic", "isotropic", None),
         ("Axis-aligned anisotropic", "anisotropic", None),
-        ("Wind-informed anisotropic", "anisotropic", wind_transform),
     ]
+    physical_builders = [
+        ("Wind-informed anisotropic", build_wind_coordinate_transform),
+        ("Current-informed anisotropic", build_current_coordinate_transform),
+    ]
+    for label, builder in physical_builders:
+        try:
+            model_configs.append((label, "anisotropic", builder(args, grid_data)))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"\nSkipping {label}: {exc}")
 
     print(
         "\n=== Kernel comparison study "
@@ -513,7 +591,11 @@ def run_kernel_comparison_study(
                     rmse_matrix[seed_index, count_index] = reconstruction.rmse
                     mae_matrix[seed_index, count_index] = reconstruction.mae
                     r2_matrix[seed_index, count_index] = reconstruction.r2
-                    print(f"RMSE={reconstruction.rmse:.6g}  R^2={reconstruction.r2:.4f}")
+                    print(
+                        f"RMSE={reconstruction.rmse:.6g}  "
+                        f"R^2={reconstruction.r2:.4f}  "
+                        f"neg={100.0 * reconstruction.negative_prediction_fraction:.3g}%"
+                    )
                 except ValueError as exc:
                     print(f"skipped ({exc})")
 
@@ -605,7 +687,11 @@ def run_sample_size_study(
             mae_list.append(reconstruction.mae)
             r2_list.append(reconstruction.r2)
             valid_counts.append(n)
-            print(f"RMSE={reconstruction.rmse:.6g}  R^2={reconstruction.r2:.4f}")
+            print(
+                f"RMSE={reconstruction.rmse:.6g}  "
+                f"R^2={reconstruction.r2:.4f}  "
+                f"neg={100.0 * reconstruction.negative_prediction_fraction:.3g}%"
+            )
         except ValueError as exc:
             print(f"skipped ({exc})")
 
@@ -695,7 +781,11 @@ def run_sample_size_study_multiseed(
                 rmse_matrix[s_idx, n_idx] = reconstruction.rmse
                 mae_matrix[s_idx, n_idx]  = reconstruction.mae
                 r2_matrix[s_idx, n_idx]   = reconstruction.r2
-                print(f"RMSE={reconstruction.rmse:.6g}  R^2={reconstruction.r2:.4f}")
+                print(
+                    f"RMSE={reconstruction.rmse:.6g}  "
+                    f"R^2={reconstruction.r2:.4f}  "
+                    f"neg={100.0 * reconstruction.negative_prediction_fraction:.3g}%"
+                )
             except ValueError as exc:
                 print(f"skipped ({exc})")
 

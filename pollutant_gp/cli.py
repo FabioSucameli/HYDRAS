@@ -130,9 +130,24 @@ def parse_args() -> argparse.Namespace:
         dest="physically_informed",
         action="store_true",
         help=(
-            "Rotate spatial coordinates before GP fitting using the wind forcing direction. "
-            "This is intended for wind-informed anisotropic GP experiments."
+            "Rotate spatial coordinates before GP fitting using a physical transport direction. "
+            "Use --physics-source to choose wind or current."
         ),
+    )
+    parser.add_argument(
+        "--current-informed",
+        dest="current_informed",
+        action="store_true",
+        help=(
+            "Shortcut for --physically-informed --physics-source current. "
+            "The current direction is read from a NetCDF U/V velocity file."
+        ),
+    )
+    parser.add_argument(
+        "--physics-source",
+        choices=("wind", "current"),
+        default="wind",
+        help="Physical information source used when --physically-informed is enabled.",
     )
     parser.add_argument(
         "--wind-file",
@@ -157,6 +172,39 @@ def parse_args() -> argparse.Namespace:
             "Interpret wind directions as meteorological 'from' directions or as transport "
             "'toward' directions."
         ),
+    )
+    parser.add_argument(
+        "--current-file",
+        type=Path,
+        default=Path("CL02_V1_SRC000_U_V_10mGrid.nc"),
+        help="Path to the NetCDF file containing current velocity components.",
+    )
+    parser.add_argument(
+        "--current-average-hours",
+        type=float,
+        default=12.0,
+        help=(
+            "Number of hours before the selected timestamp used to compute the mean current "
+            "transport direction. Use 0 for the nearest current snapshot."
+        ),
+    )
+    parser.add_argument(
+        "--current-u-variable",
+        type=str,
+        default="u_velocity",
+        help="Name of the eastward current velocity variable in --current-file.",
+    )
+    parser.add_argument(
+        "--current-v-variable",
+        type=str,
+        default="v_velocity",
+        help="Name of the northward current velocity variable in --current-file.",
+    )
+    parser.add_argument(
+        "--current-time-dim",
+        type=str,
+        default=DEFAULT_TIME_DIM,
+        help="Name of the time coordinate in --current-file.",
     )
     parser.add_argument(
         "--length-scale-lower-bound",
@@ -263,7 +311,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Run a multi-seed comparison between isotropic, axis-aligned anisotropic, "
-            "and wind-informed anisotropic GP kernels."
+            "wind-informed anisotropic, and current-informed anisotropic GP kernels "
+            "when the corresponding physical files are available."
         ),
     )
     parser.add_argument(
@@ -276,4 +325,8 @@ def parse_args() -> argparse.Namespace:
             "Example: --sample-size-study-seeds 7 42 123"
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.current_informed:
+        args.physically_informed = True
+        args.physics_source = "current"
+    return args
