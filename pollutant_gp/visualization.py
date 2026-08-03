@@ -37,6 +37,14 @@ def _std_for_plot(matrix: np.ndarray) -> np.ndarray:
     ddof = 1 if matrix.shape[0] > 1 else 0
     return np.nanstd(matrix, axis=0, ddof=ddof)
 
+
+KERNEL_COMPARISON_STYLES = {
+    "Isotropic": {"color": "#0072B2", "marker": "o", "linestyle": "-"},
+    "Axis-aligned anisotropic": {"color": "#E69F00", "marker": "s", "linestyle": "--"},
+    "Wind-informed anisotropic": {"color": "#009E73", "marker": "^", "linestyle": "-."},
+    "Current-informed anisotropic": {"color": "#CC79A7", "marker": "D", "linestyle": ":"},
+}
+
 # Draw a single spatial panel with the given data and formatting. Optionally overlay sample locations.
 def _draw_spatial_panel(
     axis: plt.Axes,
@@ -474,12 +482,6 @@ def plot_kernel_comparison_multiseed(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     x = np.asarray(n_samples_list)
-    colors = {
-        "Isotropic": "steelblue",
-        "Axis-aligned anisotropic": "darkorange",
-        "Wind-informed anisotropic": "seagreen",
-    }
-
     fig, axes = plt.subplots(2, 1, figsize=(10, 10), constrained_layout=True)
     metrics = [
         ("rmse", "RMSE", "RMSE vs number of sensors"),
@@ -491,15 +493,15 @@ def plot_kernel_comparison_multiseed(
             matrix = model_results[metric_key]
             mean = np.nanmean(matrix, axis=0)
             std = _std_for_plot(matrix)
-            color = colors.get(label, None)
+            style = KERNEL_COMPARISON_STYLES.get(label, {})
 
             axis.errorbar(
                 x,
                 mean,
                 yerr=std,
-                color=color,
-                marker="o",
-                linestyle="-",
+                color=style.get("color"),
+                marker=style.get("marker", "o"),
+                linestyle=style.get("linestyle", "-"),
                 linewidth=2.2,
                 markersize=6,
                 capsize=4,
@@ -511,7 +513,7 @@ def plot_kernel_comparison_multiseed(
         axis.set_ylabel(ylabel)
         axis.set_title(title)
         axis.grid(True, linestyle="-", alpha=0.25)
-        axis.legend(fontsize=9, loc="best")
+        axis.legend(fontsize=8.5, loc="best", ncol=2)
 
     fig.suptitle("CL02_V1_SRC131, time index 729: kernel comparison over random seeds")
     fig.set_constrained_layout_pads(h_pad=0.08, hspace=0.08)
@@ -531,11 +533,6 @@ def plot_kernel_comparison_multiseed_panels(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     x = np.asarray(n_samples_list)
-    colors = {
-        "Isotropic": "steelblue",
-        "Axis-aligned anisotropic": "darkorange",
-        "Wind-informed anisotropic": "seagreen",
-    }
     metrics = [
         ("rmse", "RMSE", "RMSE vs number of sensors", "rmse"),
         ("r2", "R2", "R2 vs number of sensors", "r2"),
@@ -550,15 +547,15 @@ def plot_kernel_comparison_multiseed_panels(
             matrix = model_results[metric_key]
             mean = np.nanmean(matrix, axis=0)
             std = _std_for_plot(matrix)
-            color = colors.get(label, None)
+            style = KERNEL_COMPARISON_STYLES.get(label, {})
 
             axis.errorbar(
                 x,
                 mean,
                 yerr=std,
-                color=color,
-                marker="o",
-                linestyle="-",
+                color=style.get("color"),
+                marker=style.get("marker", "o"),
+                linestyle=style.get("linestyle", "-"),
                 linewidth=2.2,
                 markersize=6,
                 capsize=4,
@@ -570,7 +567,7 @@ def plot_kernel_comparison_multiseed_panels(
         axis.set_ylabel(ylabel)
         axis.set_title(title)
         axis.grid(True, linestyle="-", alpha=0.25)
-        axis.legend(fontsize=9)
+        axis.legend(fontsize=8.5, ncol=2)
 
         fig.savefig(panel_path, dpi=220)
         if show:

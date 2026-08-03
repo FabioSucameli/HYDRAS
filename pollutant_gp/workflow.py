@@ -494,20 +494,15 @@ def run_workflow(args: argparse.Namespace) -> None:
         run_sample_size_study_multiseed(args, grid_data, figure_path, coordinate_transform)
 
 
-def fit_and_reconstruct_once(
+def fit_and_reconstruct_samples(
     args: argparse.Namespace,
     grid_data,
-    n_samples: int,
+    sample_coordinates: np.ndarray,
+    sample_values: np.ndarray,
     random_seed: int,
     kernel_mode: str,
     coordinate_transform: RotationTransform | None,
 ):
-    sample_coordinates, sample_values, _ = sample_sensor_points(
-        grid_data=grid_data,
-        n_samples=n_samples,
-        noise_std=args.noise_std,
-        random_seed=random_seed,
-    )
     model_sample_coordinates = maybe_transform_coordinates(
         sample_coordinates,
         coordinate_transform,
@@ -525,7 +520,7 @@ def fit_and_reconstruct_once(
         n_restarts=args.n_restarts,
         random_seed=random_seed,
     )
-    return reconstruct_field(
+    reconstruction = reconstruct_field(
         grid_data=grid_data,
         model=model,
         coordinate_scaler=coordinate_scaler,
@@ -534,6 +529,12 @@ def fit_and_reconstruct_once(
         clip_negative=args.clip_negative,
         coordinate_transform=coordinate_transform,
     )
+    return reconstruction, model
+
+
+def length_scale_hits_lower_bound(model, lower_bound: float) -> bool:
+    length_scales = np.atleast_1d(model.kernel_.k1.k2.length_scale)
+    return bool(np.any(length_scales <= lower_bound * (1.0 + 1e-3)))
 
 
 def run_kernel_comparison_study(
@@ -565,12 +566,25 @@ def run_kernel_comparison_study(
         "\n=== Kernel comparison study "
         f"({len(model_configs)} models x {len(seeds)} seeds x {len(sample_counts)} counts) ==="
     )
+    print("Sampling design: identical sensor locations and values are shared by all models.")
+
+    shared_samples: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+    for seed in seeds:
+        for n_samples in sample_counts:
+            sample_coordinates, sample_values, _ = sample_sensor_points(
+                grid_data=grid_data,
+                n_samples=n_samples,
+                noise_std=args.noise_std,
+                random_seed=seed,
+            )
+            shared_samples[(seed, n_samples)] = (sample_coordinates, sample_values)
 
     results_by_model: dict[str, dict[str, np.ndarray]] = {}
     for label, kernel_mode, coordinate_transform in model_configs:
         rmse_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
         mae_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
         r2_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
+        lower_bound_hit_matrix = np.zeros((len(seeds), len(sample_counts)), dtype=bool)
 
         print(f"\n  Model: {label}")
         for seed_index, seed in enumerate(seeds):
@@ -578,12 +592,14 @@ def run_kernel_comparison_study(
             for count_index, n_samples in enumerate(sample_counts):
                 print(f"      n_samples={n_samples} ...", end=" ", flush=True)
                 try:
+                    sample_coordinates, sample_values = shared_samples[(seed, n_samples)]
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                        reconstruction = fit_and_reconstruct_once(
+                        reconstruction, model = fit_and_reconstruct_samples(
                             args=args,
                             grid_data=grid_data,
-                            n_samples=n_samples,
+                            sample_coordinates=sample_coordinates,
+                            sample_values=sample_values,
                             random_seed=seed,
                             kernel_mode=kernel_mode,
                             coordinate_transform=coordinate_transform,
@@ -591,11 +607,21 @@ def run_kernel_comparison_study(
                     rmse_matrix[seed_index, count_index] = reconstruction.rmse
                     mae_matrix[seed_index, count_index] = reconstruction.mae
                     r2_matrix[seed_index, count_index] = reconstruction.r2
+                    lower_bound_hit = length_scale_hits_lower_bound(
+                        model,
+                        args.length_scale_lower_bound,
+                    )
+                    lower_bound_hit_matrix[seed_index, count_index] = lower_bound_hit
                     print(
                         f"RMSE={reconstruction.rmse:.6g}  "
                         f"R^2={reconstruction.r2:.4f}  "
                         f"neg={100.0 * reconstruction.negative_prediction_fraction:.3g}%"
                     )
+                    if lower_bound_hit:
+                        print(
+                            "        warning: an optimized length scale reached the lower bound; "
+                            "consider a bound-sensitivity test."
+                        )
                 except ValueError as exc:
                     print(f"skipped ({exc})")
 
@@ -603,6 +629,7 @@ def run_kernel_comparison_study(
             "rmse": rmse_matrix,
             "mae": mae_matrix,
             "r2": r2_matrix,
+            "length_scale_lower_bound_hit": lower_bound_hit_matrix,
         }
 
     print("\n=== Kernel comparison summary ===")
@@ -616,6 +643,11 @@ def run_kernel_comparison_study(
                 f"    n_samples={n_samples}: "
                 f"RMSE={np.nanmean(rmse_values):.6g} +/- {np.nanstd(rmse_values, ddof=std_ddof):.6g}, "
                 f"R^2={np.nanmean(r2_values):.6g} +/- {np.nanstd(r2_values, ddof=std_ddof):.6g}"
+            )
+        bound_hits = int(np.count_nonzero(model_results["length_scale_lower_bound_hit"]))
+        if bound_hits:
+            print(
+                f"    Diagnostic: {bound_hits} fit(s) reached the length-scale lower bound."
             )
 
     plot_kernel_comparison_multiseed(
