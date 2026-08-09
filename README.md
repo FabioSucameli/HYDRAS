@@ -77,11 +77,7 @@ flowchart LR
     T --> R["Rotate sensor and prediction<br/>coordinates about the domain centre"]
     R --> K["Fit the anisotropic RBF<br/>in the rotated frame"]
     K --> P["Predict, then report the maps<br/>in the original coordinates"]
-```
 
-The distinction that matters methodologically: choosing `theta` by looking at the ground truth would
-be a *diagnostic*, because in a real deployment the plume is what is unknown. Estimating it from an
-independently measured forcing is a *model*. This project does the second.
 
 ---
 
