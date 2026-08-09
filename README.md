@@ -77,7 +77,9 @@ flowchart LR
     T --> R["Rotate sensor and prediction<br/>coordinates about the domain centre"]
     R --> K["Fit the anisotropic RBF<br/>in the rotated frame"]
     K --> P["Predict, then report the maps<br/>in the original coordinates"]
+```
 
+A key methodological distinction is that the orientation angle theta is derived from independently measured physical forcing, making the orientation part of the model  
 
 ---
 
