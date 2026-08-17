@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import BoundaryNorm, ListedColormap
 
+from pollutant_gp.style import KERNEL_COMPARISON_STYLES
 from pollutant_gp.types import GridData, ReconstructionResult
 
 # Helper function to generate output paths for individual panels.
@@ -38,12 +39,8 @@ def _std_for_plot(matrix: np.ndarray) -> np.ndarray:
     return np.nanstd(matrix, axis=0, ddof=ddof)
 
 
-KERNEL_COMPARISON_STYLES = {
-    "Isotropic": {"color": "#0072B2", "marker": "o", "linestyle": "-"},
-    "Axis-aligned anisotropic": {"color": "#E69F00", "marker": "s", "linestyle": "--"},
-    "Wind-informed anisotropic": {"color": "#009E73", "marker": "^", "linestyle": "-."},
-    "Current-informed anisotropic": {"color": "#CC79A7", "marker": "D", "linestyle": ":"},
-}
+# The comparison styles now live in pollutant_gp.style, so that the thesis
+# figures and the project figures cannot drift apart.
 
 # Draw a single spatial panel with the given data and formatting. Optionally overlay sample locations.
 def _draw_spatial_panel(
