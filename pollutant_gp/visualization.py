@@ -38,10 +38,6 @@ def _std_for_plot(matrix: np.ndarray) -> np.ndarray:
     ddof = 1 if matrix.shape[0] > 1 else 0
     return np.nanstd(matrix, axis=0, ddof=ddof)
 
-
-# The comparison styles now live in pollutant_gp.style, so that the thesis
-# figures and the project figures cannot drift apart.
-
 # Draw a single spatial panel with the given data and formatting. Optionally overlay sample locations.
 def _draw_spatial_panel(
     axis: plt.Axes,
