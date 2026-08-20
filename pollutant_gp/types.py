@@ -28,4 +28,7 @@ class ReconstructionResult:
     rmse: float
     mae: float
     r2: float
-
+    min_prediction_before_clipping: float
+    negative_prediction_count: int
+    negative_prediction_fraction: float
+    mean_negative_prediction: float

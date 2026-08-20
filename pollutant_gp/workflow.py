@@ -21,7 +21,7 @@ from pollutant_gp.data import (
 from pollutant_gp.inspection import inspect_netcdf_files
 
 # Gaussian Process model training
-from pollutant_gp.model import fit_gaussian_process
+from pollutant_gp.model import GPOptimizationDiagnostics, fit_gaussian_process
 
 # Field reconstruction using the trained GP
 from pollutant_gp.reconstruction import reconstruct_field
@@ -48,6 +48,97 @@ from pollutant_gp.visualization import (
     plot_valid_domain,
 )
 from pollutant_gp.wind import compute_wind_orientation, parse_time_label
+
+
+# Resolve the optimizer seed without changing the historical default behavior.
+def resolve_optimizer_seed(args: argparse.Namespace, sampling_seed: int) -> int:
+    if args.optimizer_seed is None:
+        return sampling_seed
+    return args.optimizer_seed
+
+
+# Format a numeric vector compactly for terminal diagnostics.
+def format_diagnostic_vector(values: np.ndarray) -> str:
+    return np.array2string(
+        np.asarray(values, dtype=float),
+        precision=6,
+        separator=", ",
+        suppress_small=False,
+    )
+
+
+# Summarize the most important optimization outcomes on one terminal line.
+def format_gp_optimization_summary(diagnostics: GPOptimizationDiagnostics) -> str:
+    bound_hits: list[str] = []
+    if diagnostics.length_scale_lower_bound_hit:
+        bound_hits.append("lower")
+    if diagnostics.length_scale_upper_bound_hit:
+        bound_hits.append("upper")
+    bound_status = "+".join(bound_hits) if bound_hits else "none"
+    selected_run = diagnostics.optimizer_runs[diagnostics.selected_run_index]
+    optimizer_status = "ok" if selected_run.success else f"failed:{selected_run.status}"
+    return (
+        f"LML={diagnostics.final_lml:.6g}  "
+        f"length_scale={format_diagnostic_vector(diagnostics.standardized_length_scales)}  "
+        f"length_bound={bound_status}  optimizer={optimizer_status}"
+    )
+
+
+# Print complete initialization, scaling, bound, and optimizer diagnostics.
+def print_gp_optimization_diagnostics(
+    diagnostics: GPOptimizationDiagnostics,
+    sampling_seed: int,
+) -> None:
+    print("\n=== GP optimization diagnostics ===")
+    print(f"Sampling seed: {sampling_seed}")
+    print(f"Optimizer seed: {diagnostics.optimizer_seed}")
+    print(f"Configured optimizer restarts: {diagnostics.n_restarts}")
+    print(f"Total optimizer runs: {len(diagnostics.optimizer_runs)}")
+    print(f"Coordinate mean: {format_diagnostic_vector(diagnostics.coordinate_mean)}")
+    print(f"Coordinate scale: {format_diagnostic_vector(diagnostics.coordinate_scale)}")
+    print(f"Target mean before normalize_y: {diagnostics.target_mean:.8g}")
+    print(f"Target scale before normalize_y: {diagnostics.target_scale:.8g}")
+    print(f"Initial LML: {diagnostics.initial_lml:.8g}")
+    print(f"Final LML: {diagnostics.final_lml:.8g}")
+    print(f"Final LML gradient norm: {diagnostics.final_lml_gradient_norm:.8g}")
+    print(f"Selected optimizer run: {diagnostics.selected_run_index}")
+    print(
+        "Standardized length scales: "
+        f"{format_diagnostic_vector(diagnostics.standardized_length_scales)}"
+    )
+    print(
+        "Length scales in coordinate units: "
+        f"{format_diagnostic_vector(diagnostics.physical_length_scales)}"
+    )
+
+    print("Hyperparameters:")
+    for parameter in diagnostics.hyperparameters:
+        if parameter.at_lower_bound:
+            bound_status = "LOWER"
+        elif parameter.at_upper_bound:
+            bound_status = "UPPER"
+        else:
+            bound_status = "interior"
+        print(
+            f"  - {parameter.name}: initial={parameter.initial_value:.8g}, "
+            f"optimized={parameter.optimized_value:.8g}, "
+            f"bounds=[{parameter.lower_bound:.8g}, {parameter.upper_bound:.8g}], "
+            f"status={bound_status}, "
+            f"dLML/dlog(theta)={parameter.lml_gradient:.4g}"
+        )
+
+    print("Optimizer runs:")
+    for run in diagnostics.optimizer_runs:
+        selected = " selected" if run.run_index == diagnostics.selected_run_index else ""
+        print(
+            f"  - run {run.run_index}{selected}: success={run.success}, "
+            f"status={run.status}, iterations={run.iterations}, "
+            f"evaluations={run.function_evaluations}, "
+            f"LML={run.initial_lml:.8g} -> {run.final_lml:.8g}"
+        )
+        print(f"    initial parameters: {format_diagnostic_vector(np.exp(run.initial_theta))}")
+        print(f"    final parameters:   {format_diagnostic_vector(np.exp(run.optimized_theta))}")
+        print(f"    termination: {run.message}")
 
 
 # Print how strongly the GP violates non-negativity before clipping.
@@ -331,6 +422,11 @@ def run_workflow(args: argparse.Namespace) -> None:
         print("Valid domain: finite concentration values; NaN cells are ignored")
         print(f"Number of sensor samples: {args.n_samples}")
         print(f"Sensor noise standard deviation: {args.noise_std}")
+        if args.optimizer_seed is None:
+            print("Optimizer seed: reuse the sampling seed for each fit")
+        else:
+            print(f"Optimizer seed: {args.optimizer_seed}")
+        print(f"Optimizer restarts: {args.n_restarts}")
         print(f"Kernel mode: {args.kernel_mode}")
         print(f"Kernel comparison study: {args.kernel_comparison_study}")
         if args.kernel_comparison_study:
@@ -424,7 +520,8 @@ def run_workflow(args: argparse.Namespace) -> None:
     # The GP learns a mapping from spatial coordinates to concentration: (x, y) -> C
     # using only the sparse synthetic measurements.
     print("\n=== Fitting Gaussian Process ===")
-    model, coordinate_scaler = fit_gaussian_process(
+    optimizer_seed = resolve_optimizer_seed(args, args.random_seed)
+    model, coordinate_scaler, optimization_diagnostics = fit_gaussian_process(
         sample_coordinates=model_sample_coordinates,
         sample_values=sample_values,
         kernel_mode=args.kernel_mode,
@@ -435,9 +532,13 @@ def run_workflow(args: argparse.Namespace) -> None:
         noise_level_upper_bound=args.noise_level_upper_bound,
         target_transform=args.target_transform,
         n_restarts=args.n_restarts,
-        random_seed=args.random_seed,
+        optimizer_seed=optimizer_seed,
     )
     print(f"Learned kernel: {model.kernel_}")
+    print_gp_optimization_diagnostics(
+        optimization_diagnostics,
+        sampling_seed=args.random_seed,
+    )
 
     # Reconstruct the full concentration field on the grid using the trained GP.
     print("\n=== Reconstructing field ===")
@@ -507,7 +608,8 @@ def fit_and_reconstruct_samples(
         sample_coordinates,
         coordinate_transform,
     )
-    model, coordinate_scaler = fit_gaussian_process(
+    optimizer_seed = resolve_optimizer_seed(args, random_seed)
+    model, coordinate_scaler, optimization_diagnostics = fit_gaussian_process(
         sample_coordinates=model_sample_coordinates,
         sample_values=sample_values,
         kernel_mode=kernel_mode,
@@ -518,7 +620,7 @@ def fit_and_reconstruct_samples(
         noise_level_upper_bound=args.noise_level_upper_bound,
         target_transform=args.target_transform,
         n_restarts=args.n_restarts,
-        random_seed=random_seed,
+        optimizer_seed=optimizer_seed,
     )
     reconstruction = reconstruct_field(
         grid_data=grid_data,
@@ -529,12 +631,7 @@ def fit_and_reconstruct_samples(
         clip_negative=args.clip_negative,
         coordinate_transform=coordinate_transform,
     )
-    return reconstruction, model
-
-
-def length_scale_hits_lower_bound(model, lower_bound: float) -> bool:
-    length_scales = np.atleast_1d(model.kernel_.k1.k2.length_scale)
-    return bool(np.any(length_scales <= lower_bound * (1.0 + 1e-3)))
+    return reconstruction, model, optimization_diagnostics
 
 
 def run_kernel_comparison_study(
@@ -585,6 +682,8 @@ def run_kernel_comparison_study(
         mae_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
         r2_matrix = np.full((len(seeds), len(sample_counts)), np.nan)
         lower_bound_hit_matrix = np.zeros((len(seeds), len(sample_counts)), dtype=bool)
+        upper_bound_hit_matrix = np.zeros((len(seeds), len(sample_counts)), dtype=bool)
+        optimizer_failure_matrix = np.zeros((len(seeds), len(sample_counts)), dtype=bool)
 
         print(f"\n  Model: {label}")
         for seed_index, seed in enumerate(seeds):
@@ -595,7 +694,7 @@ def run_kernel_comparison_study(
                     sample_coordinates, sample_values = shared_samples[(seed, n_samples)]
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                        reconstruction, model = fit_and_reconstruct_samples(
+                        reconstruction, model, optimization_diagnostics = fit_and_reconstruct_samples(
                             args=args,
                             grid_data=grid_data,
                             sample_coordinates=sample_coordinates,
@@ -607,21 +706,22 @@ def run_kernel_comparison_study(
                     rmse_matrix[seed_index, count_index] = reconstruction.rmse
                     mae_matrix[seed_index, count_index] = reconstruction.mae
                     r2_matrix[seed_index, count_index] = reconstruction.r2
-                    lower_bound_hit = length_scale_hits_lower_bound(
-                        model,
-                        args.length_scale_lower_bound,
-                    )
+                    lower_bound_hit = optimization_diagnostics.length_scale_lower_bound_hit
+                    upper_bound_hit = optimization_diagnostics.length_scale_upper_bound_hit
                     lower_bound_hit_matrix[seed_index, count_index] = lower_bound_hit
+                    upper_bound_hit_matrix[seed_index, count_index] = upper_bound_hit
+                    optimizer_failure_matrix[seed_index, count_index] = (
+                        optimization_diagnostics.optimizer_failure_count > 0
+                    )
                     print(
                         f"RMSE={reconstruction.rmse:.6g}  "
                         f"R^2={reconstruction.r2:.4f}  "
                         f"neg={100.0 * reconstruction.negative_prediction_fraction:.3g}%"
                     )
-                    if lower_bound_hit:
-                        print(
-                            "        warning: an optimized length scale reached the lower bound; "
-                            "consider a bound-sensitivity test."
-                        )
+                    print(
+                        "        optimization: "
+                        f"{format_gp_optimization_summary(optimization_diagnostics)}"
+                    )
                 except ValueError as exc:
                     print(f"skipped ({exc})")
 
@@ -630,6 +730,8 @@ def run_kernel_comparison_study(
             "mae": mae_matrix,
             "r2": r2_matrix,
             "length_scale_lower_bound_hit": lower_bound_hit_matrix,
+            "length_scale_upper_bound_hit": upper_bound_hit_matrix,
+            "optimizer_failure": optimizer_failure_matrix,
         }
 
     print("\n=== Kernel comparison summary ===")
@@ -648,6 +750,18 @@ def run_kernel_comparison_study(
         if bound_hits:
             print(
                 f"    Diagnostic: {bound_hits} fit(s) reached the length-scale lower bound."
+            )
+        upper_bound_hits = int(
+            np.count_nonzero(model_results["length_scale_upper_bound_hit"])
+        )
+        if upper_bound_hits:
+            print(
+                f"    Diagnostic: {upper_bound_hits} fit(s) reached the length-scale upper bound."
+            )
+        optimizer_failures = int(np.count_nonzero(model_results["optimizer_failure"]))
+        if optimizer_failures:
+            print(
+                f"    Diagnostic: {optimizer_failures} fit(s) had at least one failed optimizer run."
             )
 
     plot_kernel_comparison_multiseed(
@@ -693,7 +807,8 @@ def run_sample_size_study(
                 sample_coordinates,
                 coordinate_transform,
             )
-            model, coordinate_scaler = fit_gaussian_process(
+            optimizer_seed = resolve_optimizer_seed(args, args.random_seed)
+            model, coordinate_scaler, optimization_diagnostics = fit_gaussian_process(
                 sample_coordinates=model_sample_coordinates,
                 sample_values=sample_values,
                 kernel_mode=args.kernel_mode,
@@ -704,7 +819,7 @@ def run_sample_size_study(
                 noise_level_upper_bound=args.noise_level_upper_bound,
                 target_transform=args.target_transform,
                 n_restarts=args.n_restarts,
-                random_seed=args.random_seed,
+                optimizer_seed=optimizer_seed,
             )
             reconstruction = reconstruct_field(
                 grid_data=grid_data,
@@ -723,6 +838,10 @@ def run_sample_size_study(
                 f"RMSE={reconstruction.rmse:.6g}  "
                 f"R^2={reconstruction.r2:.4f}  "
                 f"neg={100.0 * reconstruction.negative_prediction_fraction:.3g}%"
+            )
+            print(
+                "    optimization: "
+                f"{format_gp_optimization_summary(optimization_diagnostics)}"
             )
         except ValueError as exc:
             print(f"skipped ({exc})")
@@ -788,7 +907,8 @@ def run_sample_size_study_multiseed(
                 )
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                    model, coordinate_scaler = fit_gaussian_process(
+                    optimizer_seed = resolve_optimizer_seed(args, seed)
+                    model, coordinate_scaler, optimization_diagnostics = fit_gaussian_process(
                         sample_coordinates=model_sample_coordinates,
                         sample_values=sample_values,
                         kernel_mode=args.kernel_mode,
@@ -799,7 +919,7 @@ def run_sample_size_study_multiseed(
                         noise_level_upper_bound=args.noise_level_upper_bound,
                         target_transform=args.target_transform,
                         n_restarts=args.n_restarts,
-                        random_seed=seed,
+                        optimizer_seed=optimizer_seed,
                     )
                 reconstruction = reconstruct_field(
                     grid_data=grid_data,
@@ -817,6 +937,10 @@ def run_sample_size_study_multiseed(
                     f"RMSE={reconstruction.rmse:.6g}  "
                     f"R^2={reconstruction.r2:.4f}  "
                     f"neg={100.0 * reconstruction.negative_prediction_fraction:.3g}%"
+                )
+                print(
+                    "      optimization: "
+                    f"{format_gp_optimization_summary(optimization_diagnostics)}"
                 )
             except ValueError as exc:
                 print(f"skipped ({exc})")

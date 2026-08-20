@@ -119,6 +119,15 @@ def parse_args() -> argparse.Namespace:
         help="Random seed for reproducible sampling and noise.",
     )
     parser.add_argument(
+        "--optimizer-seed",
+        type=int,
+        default=None,
+        help=(
+            "Random seed used only for GP optimizer restarts. "
+            "Default: reuse the sampling seed for backward-compatible behavior."
+        ),
+    )
+    parser.add_argument(
         "--kernel-mode",
         choices=("anisotropic", "isotropic"),
         default="anisotropic",
