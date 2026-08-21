@@ -228,6 +228,21 @@ def parse_args() -> argparse.Namespace:
         help="Upper bound for GP RBF length scales in standardized coordinates.",
     )
     parser.add_argument(
+        "--length-scale-lower-bound-study",
+        action="store_true",
+        help=(
+            "Run a controlled sensitivity study over RBF length-scale lower bounds. "
+            "The same sensor observations and kernel initialization are used in every fit."
+        ),
+    )
+    parser.add_argument(
+        "--length-scale-lower-bound-study-values",
+        type=float,
+        nargs="+",
+        default=[0.025, 0.05, 0.075, 0.10],
+        help="Lower-bound values used by --length-scale-lower-bound-study.",
+    )
+    parser.add_argument(
         "--noise-level-initial",
         type=float,
         default=1e-4,

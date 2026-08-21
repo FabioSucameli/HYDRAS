@@ -39,6 +39,7 @@ from pollutant_gp.visualization import (
     plot_concentration_map,
     plot_kernel_comparison_multiseed,
     plot_kernel_comparison_multiseed_panels,
+    plot_length_scale_lower_bound_study,
     plot_reconstruction,
     plot_reconstruction_panels,
     plot_sample_size_study,
@@ -225,6 +226,26 @@ def make_kernel_comparison_path(
     time_part = f"time_{time_index}" if time_index is not None else "no_time"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"{dataset_name}_{time_part}_kernel_comparison_{timestamp}.png"
+    return output_dir / file_name
+
+
+def make_length_scale_lower_bound_study_path(
+    output_dir: Path,
+    figure_name: str | None,
+    nc_file: Path,
+    time_index: int | None,
+    n_samples: int,
+) -> Path:
+    if figure_name:
+        return output_dir / figure_name
+
+    dataset_name = nc_file.stem
+    time_part = f"time_{time_index}" if time_index is not None else "no_time"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = (
+        f"{dataset_name}_{time_part}_samples_{n_samples}_"
+        f"lower_bound_study_{timestamp}.png"
+    )
     return output_dir / file_name
 
 
@@ -428,6 +449,7 @@ def run_workflow(args: argparse.Namespace) -> None:
             print(f"Optimizer seed: {args.optimizer_seed}")
         print(f"Optimizer restarts: {args.n_restarts}")
         print(f"Kernel mode: {args.kernel_mode}")
+        print(f"Length-scale lower-bound study: {args.length_scale_lower_bound_study}")
         print(f"Kernel comparison study: {args.kernel_comparison_study}")
         if args.kernel_comparison_study:
             print("Physically informed rotation: evaluated inside the kernel comparison study")
@@ -499,6 +521,22 @@ def run_workflow(args: argparse.Namespace) -> None:
         return
 
     coordinate_transform = build_coordinate_transform(args, grid_data)
+
+    if args.length_scale_lower_bound_study:
+        study_path = make_length_scale_lower_bound_study_path(
+            output_dir=args.output_dir,
+            figure_name=args.figure_name,
+            nc_file=args.nc_file,
+            time_index=time_index,
+            n_samples=args.n_samples,
+        )
+        run_length_scale_lower_bound_study(
+            args=args,
+            grid_data=grid_data,
+            output_path=study_path,
+            coordinate_transform=coordinate_transform,
+        )
+        return
 
     # Sample synthetic sensor measurements
     sample_coordinates, sample_values, _ = sample_sensor_points(
@@ -593,6 +631,194 @@ def run_workflow(args: argparse.Namespace) -> None:
     # Optional multi-seed sample size study
     if args.sample_size_study_multiseed:
         run_sample_size_study_multiseed(args, grid_data, figure_path, coordinate_transform)
+
+
+# Run a controlled sensitivity study in which only the RBF lower bound changes.
+def run_length_scale_lower_bound_study(
+    args: argparse.Namespace,
+    grid_data,
+    output_path: Path,
+    coordinate_transform: RotationTransform | None,
+) -> None:
+    if args.n_restarts != 0:
+        raise ValueError(
+            "The controlled lower-bound study requires --n-restarts 0 so random restart "
+            "initializations do not change with the bounds."
+        )
+
+    lower_bounds = sorted(set(args.length_scale_lower_bound_study_values))
+    if not lower_bounds:
+        raise ValueError("At least one lower-bound study value is required.")
+    if any(value <= 0.0 for value in lower_bounds):
+        raise ValueError("All lower-bound study values must be positive.")
+    if any(value >= args.length_scale_upper_bound for value in lower_bounds):
+        raise ValueError(
+            "Every lower-bound study value must be smaller than --length-scale-upper-bound."
+        )
+
+    sample_coordinates, sample_values, _ = sample_sensor_points(
+        grid_data=grid_data,
+        n_samples=args.n_samples,
+        noise_std=args.noise_std,
+        random_seed=args.random_seed,
+    )
+    model_sample_coordinates = maybe_transform_coordinates(
+        sample_coordinates,
+        coordinate_transform,
+    )
+    optimizer_seed = resolve_optimizer_seed(args, args.random_seed)
+
+    lml_values: list[float] = []
+    rmse_values: list[float] = []
+    r2_values: list[float] = []
+    constant_kernel_values: list[float] = []
+    white_kernel_values: list[float] = []
+    standardized_length_scale_rows: list[np.ndarray] = []
+    physical_length_scale_rows: list[np.ndarray] = []
+    length_scale_bound_hit_rows: list[np.ndarray] = []
+
+    print("\n=== Controlled length-scale lower-bound study ===")
+    print(f"Lower bounds: {format_diagnostic_vector(np.asarray(lower_bounds))}")
+    print(f"Shared sampling seed: {args.random_seed}")
+    print(f"Shared optimizer seed: {optimizer_seed}")
+    print(f"Shared sensor count: {args.n_samples}")
+    print(f"Shared upper bound: {args.length_scale_upper_bound:g}")
+    print("Optimizer restarts: 0")
+    print("Sampling design: the same sensor coordinates and values are reused in every fit.")
+
+    for lower_bound in lower_bounds:
+        print(f"\n  Lower bound = {lower_bound:g}")
+        model, coordinate_scaler, diagnostics = fit_gaussian_process(
+            sample_coordinates=model_sample_coordinates,
+            sample_values=sample_values,
+            kernel_mode=args.kernel_mode,
+            length_scale_lower_bound=lower_bound,
+            length_scale_upper_bound=args.length_scale_upper_bound,
+            noise_level_initial=args.noise_level_initial,
+            noise_level_lower_bound=args.noise_level_lower_bound,
+            noise_level_upper_bound=args.noise_level_upper_bound,
+            target_transform=args.target_transform,
+            n_restarts=0,
+            optimizer_seed=optimizer_seed,
+        )
+        reconstruction = reconstruct_field(
+            grid_data=grid_data,
+            model=model,
+            coordinate_scaler=coordinate_scaler,
+            batch_size=args.prediction_batch_size,
+            target_transform=args.target_transform,
+            clip_negative=args.clip_negative,
+            coordinate_transform=coordinate_transform,
+        )
+
+        length_parameters = [
+            parameter
+            for parameter in diagnostics.hyperparameters
+            if "length_scale" in parameter.name
+        ]
+        length_gradients = np.asarray(
+            [parameter.lml_gradient for parameter in length_parameters],
+            dtype=float,
+        )
+        length_bound_hits = np.asarray(
+            [parameter.at_lower_bound for parameter in length_parameters],
+            dtype=bool,
+        )
+        if length_bound_hits.size == 1:
+            length_bound_hits = np.repeat(
+                length_bound_hits,
+                diagnostics.physical_length_scales.size,
+            )
+
+        selected_run = diagnostics.optimizer_runs[diagnostics.selected_run_index]
+        print(f"    Learned kernel: {model.kernel_}")
+        print(
+            f"    LML: {diagnostics.initial_lml:.8g} -> {diagnostics.final_lml:.8g}; "
+            f"gradient norm={diagnostics.final_lml_gradient_norm:.6g}"
+        )
+        print(
+            "    Standardized length scales: "
+            f"{format_diagnostic_vector(diagnostics.standardized_length_scales)}"
+        )
+        print(
+            "    Length scales in coordinate units: "
+            f"{format_diagnostic_vector(diagnostics.physical_length_scales)}"
+        )
+        print(
+            "    Length-scale LML gradients: "
+            f"{format_diagnostic_vector(length_gradients)}"
+        )
+        print(
+            f"    Bound hit: lower={diagnostics.length_scale_lower_bound_hit}, "
+            f"upper={diagnostics.length_scale_upper_bound_hit}"
+        )
+        print(
+            f"    Optimizer: success={selected_run.success}, status={selected_run.status}, "
+            f"iterations={selected_run.iterations}, evaluations={selected_run.function_evaluations}"
+        )
+        print(f"    Termination: {selected_run.message}")
+        print(
+            f"    Metrics: RMSE={reconstruction.rmse:.8g}, "
+            f"MAE={reconstruction.mae:.8g}, R2={reconstruction.r2:.8g}"
+        )
+
+        lml_values.append(diagnostics.final_lml)
+        rmse_values.append(reconstruction.rmse)
+        r2_values.append(reconstruction.r2)
+        constant_kernel_values.append(float(model.kernel_.k1.k1.constant_value))
+        white_kernel_values.append(float(model.kernel_.k2.noise_level))
+        standardized_length_scale_rows.append(diagnostics.standardized_length_scales)
+        physical_length_scale_rows.append(diagnostics.physical_length_scales)
+        length_scale_bound_hit_rows.append(length_bound_hits)
+
+    if coordinate_transform is None:
+        length_scale_axis_labels = ("x", "y")
+        table_length_scale_labels = ("ell_x", "ell_y")
+    else:
+        length_scale_axis_labels = ("along transport", "across transport")
+        table_length_scale_labels = ("ell_parallel", "ell_perp")
+
+    standardized_length_scales = np.vstack(standardized_length_scale_rows)
+    physical_length_scales = np.vstack(physical_length_scale_rows)
+    print("\n=== Lower-bound study summary ===")
+    print(
+        "  lower      final LML       RMSE         R2   "
+        f"{table_length_scale_labels[0]} std   "
+        f"{table_length_scale_labels[1]} std   "
+        f"{table_length_scale_labels[0]} units   "
+        f"{table_length_scale_labels[1]} units   "
+        "ConstantKernel   WhiteKernel"
+    )
+    for index, lower_bound in enumerate(lower_bounds):
+        standardized_row = standardized_length_scales[index]
+        physical_row = physical_length_scales[index]
+        standardized_values = (
+            np.repeat(standardized_row, 2)
+            if standardized_row.size == 1
+            else standardized_row
+        )
+        print(
+            f"  {lower_bound:5.3f}  {lml_values[index]:13.5f}  "
+            f"{rmse_values[index]:9.6f}  {r2_values[index]:9.6f}  "
+            f"{standardized_values[0]:9.6f}  {standardized_values[1]:9.6f}  "
+            f"{physical_row[0]:11.4f}  {physical_row[1]:11.4f}  "
+            f"{constant_kernel_values[index]:14.6g}  "
+            f"{white_kernel_values[index]:11.6g}"
+        )
+
+    model_fit_path, length_scales_path = plot_length_scale_lower_bound_study(
+        lower_bounds=lower_bounds,
+        lml_values=lml_values,
+        rmse_values=rmse_values,
+        standardized_length_scales=standardized_length_scales,
+        length_scale_bound_hits=np.vstack(length_scale_bound_hit_rows),
+        length_scale_axis_labels=length_scale_axis_labels[:standardized_length_scales.shape[1]],
+        output_path=output_path,
+        show=args.show,
+    )
+    print("\nSaved lower-bound sensitivity figures:")
+    print(f"  - {model_fit_path}")
+    print(f"  - {length_scales_path}")
 
 
 def fit_and_reconstruct_samples(

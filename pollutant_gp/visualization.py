@@ -38,6 +38,7 @@ def _std_for_plot(matrix: np.ndarray) -> np.ndarray:
     ddof = 1 if matrix.shape[0] > 1 else 0
     return np.nanstd(matrix, axis=0, ddof=ddof)
 
+
 # Draw a single spatial panel with the given data and formatting. Optionally overlay sample locations.
 def _draw_spatial_panel(
     axis: plt.Axes,
@@ -364,6 +365,94 @@ def plot_sample_size_study_panels(
         saved_paths.append(panel_path)
 
     return saved_paths
+
+
+# Plot model-fit metrics and standardized length scales across lower bounds.
+def plot_length_scale_lower_bound_study(
+    lower_bounds: Sequence[float],
+    lml_values: Sequence[float],
+    rmse_values: Sequence[float],
+    standardized_length_scales: np.ndarray,
+    length_scale_bound_hits: np.ndarray,
+    length_scale_axis_labels: Sequence[str],
+    output_path: Path,
+    show: bool,
+) -> tuple[Path, Path]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x = np.asarray(lower_bounds, dtype=float)
+    standardized_length_scales = np.asarray(standardized_length_scales, dtype=float)
+    length_scale_bound_hits = np.asarray(length_scale_bound_hits, dtype=bool)
+
+    model_fit_path = _panel_output_path(output_path, "model_fit")
+    length_scales_path = _panel_output_path(output_path, "learned_length_scales")
+
+    fit_figure, fit_axes = plt.subplots(1, 2, figsize=(10.5, 4.3), constrained_layout=True)
+    panels = (
+        (fit_axes[0], lml_values, "Log-marginal likelihood", "#0072B2"),
+        (fit_axes[1], rmse_values, "RMSE", "#D55E00"),
+    )
+    for axis, values, ylabel, color in panels:
+        axis.plot(x, values, "o-", color=color, linewidth=2.0, markersize=6)
+        axis.set_xlabel("Length-scale lower bound (standardized coordinates)")
+        axis.set_ylabel(ylabel)
+        axis.set_title(f"{ylabel} vs lower bound")
+        axis.grid(True, linestyle="-", alpha=0.25)
+
+    fit_figure.suptitle("Lower-bound sensitivity of model fit")
+    fit_figure.savefig(model_fit_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(fit_figure)
+
+    length_figure, length_axis = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
+    length_axis.plot(
+        x,
+        x,
+        "--",
+        color="#222222",
+        linewidth=1.6,
+        label="Imposed lower bound",
+        zorder=4,
+    )
+    colors = ("#0072B2", "#CC79A7")
+    for dimension in range(standardized_length_scales.shape[1]):
+        color = colors[dimension % len(colors)]
+        axis_label = length_scale_axis_labels[dimension]
+        length_axis.plot(
+            x,
+            standardized_length_scales[:, dimension],
+            "o-",
+            color=color,
+            linewidth=2.0,
+            markersize=6,
+            label=f"Learned: {axis_label}",
+            zorder=2 + dimension,
+        )
+        hit_mask = length_scale_bound_hits[:, dimension]
+        if np.any(hit_mask):
+            length_axis.scatter(
+                x[hit_mask],
+                standardized_length_scales[hit_mask, dimension],
+                s=90,
+                facecolors="none",
+                edgecolors="#222222",
+                linewidths=1.3,
+                zorder=5,
+            )
+
+    length_axis.set_xlabel("Length-scale lower bound (standardized coordinates)")
+    length_axis.set_ylabel("Learned length scale (standardized coordinates)")
+    length_axis.set_title("Learned length-scales vs imposed lower bound")
+    length_axis.grid(True, linestyle="-", alpha=0.25)
+    length_axis.legend(fontsize=9)
+
+    length_figure.savefig(length_scales_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(length_figure)
+
+    return model_fit_path, length_scales_path
 
 
 # Multi-seed sample size study
