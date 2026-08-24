@@ -564,6 +564,181 @@ def plot_optimizer_initialization_study(
     return model_fit_path, hyperparameter_path
 
 
+# Plot internal restart outcomes, nested best-LML budgets, and LML-RMSE alignment.
+def plot_optimizer_restart_study(
+    optimizer_seeds: Sequence[int],
+    run_lml_matrix: np.ndarray,
+    run_rmse_matrix: np.ndarray,
+    selected_run_indices: Sequence[int],
+    restart_budgets: Sequence[int],
+    best_lml_matrix: np.ndarray,
+    controlled_initialization_lml: float,
+    controlled_initialization_rmse: float,
+    output_path: Path,
+    show: bool,
+) -> tuple[Path, Path, Path]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    run_lml_matrix = np.asarray(run_lml_matrix, dtype=float)
+    run_rmse_matrix = np.asarray(run_rmse_matrix, dtype=float)
+    best_lml_matrix = np.asarray(best_lml_matrix, dtype=float)
+    run_indices = np.arange(run_lml_matrix.shape[1])
+    colors = ("#0072B2", "#D55E00", "#009E73", "#CC79A7")
+    markers = ("o", "s", "^", "D")
+    line_styles = ("-", "--", ":", "-.")
+
+    internal_path = _panel_output_path(output_path, "internal_run_lml")
+    budget_path = _panel_output_path(output_path, "best_lml_so_far")
+    alignment_path = _panel_output_path(output_path, "lml_rmse")
+
+    internal_figure, internal_axis = plt.subplots(
+        figsize=(8.2, 5.2),
+        constrained_layout=True,
+    )
+    for seed_index, optimizer_seed in enumerate(optimizer_seeds):
+        color = colors[seed_index % len(colors)]
+        internal_axis.plot(
+            run_indices,
+            run_lml_matrix[seed_index],
+            color=color,
+            marker=markers[seed_index % len(markers)],
+            linestyle=line_styles[seed_index % len(line_styles)],
+            linewidth=1.8,
+            markersize=6,
+            label=f"Optimizer seed {optimizer_seed}",
+        )
+        selected_index = selected_run_indices[seed_index]
+        internal_axis.scatter(
+            selected_index,
+            run_lml_matrix[seed_index, selected_index],
+            marker="*",
+            s=180,
+            color=color,
+            edgecolors="#222222",
+            linewidths=0.8,
+            zorder=5,
+        )
+    internal_axis.axhline(
+        controlled_initialization_lml,
+        color="#222222",
+        linestyle="--",
+        linewidth=1.4,
+        label=f"Controlled-initialization LML ({controlled_initialization_lml:.3f})",
+    )
+    internal_axis.set_xlabel("Internal optimizer run (0 = default initialization)")
+    internal_axis.set_ylabel("Final log-marginal likelihood")
+    internal_axis.set_title("Final LML of every internal optimizer run")
+    internal_axis.set_xticks(run_indices)
+    internal_axis.grid(True, linestyle="-", alpha=0.25)
+    internal_axis.legend(fontsize=9)
+    internal_figure.savefig(internal_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(internal_figure)
+
+    budget_figure, budget_axis = plt.subplots(
+        figsize=(7.4, 5.0),
+        constrained_layout=True,
+    )
+    for seed_index, optimizer_seed in enumerate(optimizer_seeds):
+        budget_axis.plot(
+            restart_budgets,
+            best_lml_matrix[seed_index],
+            color=colors[seed_index % len(colors)],
+            marker=markers[seed_index % len(markers)],
+            linestyle=line_styles[seed_index % len(line_styles)],
+            linewidth=2.0,
+            markersize=7,
+            label=f"Optimizer seed {optimizer_seed}",
+        )
+    budget_axis.axhline(
+        controlled_initialization_lml,
+        color="#222222",
+        linestyle="--",
+        linewidth=1.4,
+        label=f"Controlled-initialization LML ({controlled_initialization_lml:.3f})",
+    )
+    budget_axis.set_xlabel("n_restarts_optimizer budget")
+    budget_axis.set_ylabel("Best final log-marginal likelihood so far")
+    budget_axis.set_title("Nested restart budget comparison")
+    budget_axis.set_xticks(restart_budgets)
+    budget_axis.grid(True, linestyle="-", alpha=0.25)
+    budget_axis.legend(fontsize=9)
+    budget_figure.savefig(budget_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(budget_figure)
+
+    alignment_figure, alignment_axis = plt.subplots(
+        figsize=(7.4, 5.2),
+        constrained_layout=True,
+    )
+    for seed_index, optimizer_seed in enumerate(optimizer_seeds):
+        color = colors[seed_index % len(colors)]
+        alignment_axis.scatter(
+            run_lml_matrix[seed_index],
+            run_rmse_matrix[seed_index],
+            s=65,
+            marker=markers[seed_index % len(markers)],
+            facecolors=color if seed_index == 0 else "none",
+            edgecolors=color,
+            linewidths=1.5,
+            label=f"Optimizer seed {optimizer_seed}",
+        )
+        coincident_groups: dict[tuple[float, float], list[int]] = {}
+        for run_index, (lml_value, rmse_value) in enumerate(
+            zip(run_lml_matrix[seed_index], run_rmse_matrix[seed_index], strict=True)
+        ):
+            group_key = (round(float(lml_value), 4), round(float(rmse_value), 4))
+            coincident_groups.setdefault(group_key, []).append(run_index)
+
+        vertical_offset = 5 if seed_index == 0 else -14
+        for (lml_value, rmse_value), grouped_indices in coincident_groups.items():
+            if len(grouped_indices) >= 3 and grouped_indices == list(
+                range(grouped_indices[0], grouped_indices[-1] + 1)
+            ):
+                run_label = f"{grouped_indices[0]}-{grouped_indices[-1]}"
+            else:
+                run_label = ",".join(str(index) for index in grouped_indices)
+            alignment_axis.annotate(
+                run_label,
+                (lml_value, rmse_value),
+                xytext=(5, vertical_offset),
+                textcoords="offset points",
+                fontsize=8,
+                color=color,
+            )
+    alignment_axis.axvline(
+        controlled_initialization_lml,
+        color="#222222",
+        linestyle="--",
+        linewidth=1.4,
+        label=f"Controlled-initialization LML ({controlled_initialization_lml:.3f})",
+    )
+    alignment_axis.scatter(
+        controlled_initialization_lml,
+        controlled_initialization_rmse,
+        marker="*",
+        s=260,
+        color="#CC79A7",
+        edgecolors="#222222",
+        linewidths=0.9,
+        zorder=6,
+        label="Best controlled initialization",
+    )
+    alignment_axis.set_xlabel("Final log-marginal likelihood")
+    alignment_axis.set_ylabel("Full-grid RMSE")
+    alignment_axis.set_title("Optimizer objective versus reconstruction error")
+    alignment_axis.grid(True, linestyle="-", alpha=0.25)
+    alignment_axis.legend(fontsize=9)
+    alignment_figure.savefig(alignment_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(alignment_figure)
+
+    return internal_path, budget_path, alignment_path
+
+
 # Multi-seed sample size study
 
 # Plot the sample size study averaged over multiple random seeds.

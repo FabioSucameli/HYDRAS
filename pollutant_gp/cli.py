@@ -251,6 +251,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--optimizer-restart-study",
+        action="store_true",
+        help=(
+            "Run the controlled nested scikit-learn restart study and evaluate "
+            "every internal optimizer run at its final theta."
+        ),
+    )
+    parser.add_argument(
+        "--optimizer-restart-study-seeds",
+        type=int,
+        nargs="+",
+        default=[123, 7],
+        help="Optimizer seeds used by --optimizer-restart-study.",
+    )
+    parser.add_argument(
         "--noise-level-initial",
         type=float,
         default=1e-4,

@@ -354,6 +354,29 @@ def fit_gaussian_process(
     )
     return model, coordinate_scaler, diagnostics
 
+
+# Build the exact predictive GP state for a supplied theta without optimization.
+def fit_gaussian_process_at_fixed_theta(
+    sample_coordinates: np.ndarray,
+    sample_values: np.ndarray,
+    kernel_template,
+    theta: np.ndarray,
+    target_transform: str,
+) -> tuple[GaussianProcessRegressor, StandardScaler]:
+    coordinate_scaler = StandardScaler()
+    scaled_coordinates = coordinate_scaler.fit_transform(sample_coordinates)
+    transformed_values = transform_targets(sample_values, target_transform)
+    fixed_kernel = kernel_template.clone_with_theta(np.asarray(theta, dtype=float))
+
+    model = GaussianProcessRegressor(
+        kernel=fixed_kernel,
+        alpha=1e-10,
+        optimizer=None,
+        normalize_y=True,
+    )
+    model.fit(scaled_coordinates, transformed_values)
+    return model, coordinate_scaler
+
 # Predict GP mean and standard deviation in smaller batches and concatenate the results to avoid memory issues.
 def predict_in_batches(
     model: GaussianProcessRegressor,

@@ -21,7 +21,11 @@ from pollutant_gp.data import (
 from pollutant_gp.inspection import inspect_netcdf_files
 
 # Gaussian Process model training
-from pollutant_gp.model import GPOptimizationDiagnostics, fit_gaussian_process
+from pollutant_gp.model import (
+    GPOptimizationDiagnostics,
+    fit_gaussian_process,
+    fit_gaussian_process_at_fixed_theta,
+)
 
 # Field reconstruction using the trained GP
 from pollutant_gp.reconstruction import reconstruct_field
@@ -41,6 +45,7 @@ from pollutant_gp.visualization import (
     plot_kernel_comparison_multiseed_panels,
     plot_length_scale_lower_bound_study,
     plot_optimizer_initialization_study,
+    plot_optimizer_restart_study,
     plot_reconstruction,
     plot_reconstruction_panels,
     plot_sample_size_study,
@@ -270,6 +275,26 @@ def make_optimizer_initialization_study_path(
     return output_dir / file_name
 
 
+def make_optimizer_restart_study_path(
+    output_dir: Path,
+    figure_name: str | None,
+    nc_file: Path,
+    time_index: int | None,
+    n_samples: int,
+) -> Path:
+    if figure_name:
+        return output_dir / figure_name
+
+    dataset_name = nc_file.stem
+    time_part = f"time_{time_index}" if time_index is not None else "no_time"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = (
+        f"{dataset_name}_{time_part}_samples_{n_samples}_"
+        f"optimizer_restart_study_{timestamp}.png"
+    )
+    return output_dir / file_name
+
+
 def build_wind_coordinate_transform(
     args: argparse.Namespace,
     grid_data,
@@ -472,6 +497,9 @@ def run_workflow(args: argparse.Namespace) -> None:
         print(f"Kernel mode: {args.kernel_mode}")
         print(f"Length-scale lower-bound study: {args.length_scale_lower_bound_study}")
         print(f"Optimizer initialization study: {args.optimizer_initialization_study}")
+        print(f"Optimizer restart study: {args.optimizer_restart_study}")
+        if args.optimizer_restart_study:
+            print(f"Restart-study optimizer seeds: {args.optimizer_restart_study_seeds}")
         print(f"Kernel comparison study: {args.kernel_comparison_study}")
         if args.kernel_comparison_study:
             print("Physically informed rotation: evaluated inside the kernel comparison study")
@@ -544,11 +572,33 @@ def run_workflow(args: argparse.Namespace) -> None:
 
     coordinate_transform = build_coordinate_transform(args, grid_data)
 
-    if args.optimizer_initialization_study and args.length_scale_lower_bound_study:
-        raise ValueError(
-            "Choose either --optimizer-initialization-study or "
-            "--length-scale-lower-bound-study, not both."
+    controlled_optimizer_study_count = sum(
+        (
+            args.optimizer_initialization_study,
+            args.optimizer_restart_study,
+            args.length_scale_lower_bound_study,
         )
+    )
+    if controlled_optimizer_study_count > 1:
+        raise ValueError(
+            "Choose only one controlled optimizer or lower-bound study at a time."
+        )
+
+    if args.optimizer_restart_study:
+        study_path = make_optimizer_restart_study_path(
+            output_dir=args.output_dir,
+            figure_name=args.figure_name,
+            nc_file=args.nc_file,
+            time_index=time_index,
+            n_samples=args.n_samples,
+        )
+        run_optimizer_restart_study(
+            args=args,
+            grid_data=grid_data,
+            output_path=study_path,
+            coordinate_transform=coordinate_transform,
+        )
+        return
 
     if args.optimizer_initialization_study:
         study_path = make_optimizer_initialization_study_path(
@@ -1059,6 +1109,369 @@ def run_optimizer_initialization_study(
     print("\nSaved optimizer initialization study figures:")
     print(f"  - {model_fit_path}")
     print(f"  - {hyperparameter_path}")
+
+
+# Analyze every internal scikit-learn restart and nested restart budget.
+def run_optimizer_restart_study(
+    args: argparse.Namespace,
+    grid_data,
+    output_path: Path,
+    coordinate_transform: RotationTransform | None,
+) -> None:
+    required_restarts = 7
+    restart_budgets = (0, 1, 3, 5, 7)
+    controlled_initialization_lml = -865.51843
+    controlled_initialization_rmse = 0.24532383
+
+    if args.n_restarts != required_restarts:
+        raise ValueError(
+            "The controlled restart study requires --n-restarts 7 so the nested "
+            "budgets are exactly 0, 1, 3, 5, and 7."
+        )
+    if args.kernel_mode != "anisotropic":
+        raise ValueError("The controlled restart study requires --kernel-mode anisotropic.")
+    if coordinate_transform is None:
+        raise ValueError(
+            "The controlled restart study requires a physically informed coordinate transform."
+        )
+
+    optimizer_seeds = list(dict.fromkeys(args.optimizer_restart_study_seeds))
+    if not optimizer_seeds:
+        raise ValueError("At least one optimizer restart study seed is required.")
+
+    sample_coordinates, sample_values, _ = sample_sensor_points(
+        grid_data=grid_data,
+        n_samples=args.n_samples,
+        noise_std=args.noise_std,
+        random_seed=args.random_seed,
+    )
+    model_sample_coordinates = maybe_transform_coordinates(
+        sample_coordinates,
+        coordinate_transform,
+    )
+
+    print("\n=== Controlled scikit-learn optimizer restart study ===")
+    print(f"Shared sampling seed: {args.random_seed}")
+    print(f"Optimizer seeds: {optimizer_seeds}")
+    print(f"Shared sensor count: {args.n_samples}")
+    print(
+        "Shared length-scale bounds: "
+        f"[{args.length_scale_lower_bound:g}, {args.length_scale_upper_bound:g}]"
+    )
+    print(f"Additional restarts per optimizer seed: {required_restarts}")
+    print(f"Total internal optimizer runs per seed: {required_restarts + 1}")
+    print(f"Nested restart budgets: {list(restart_budgets)}")
+    print(
+        "Internal-run metrics: each final theta is evaluated with optimizer=None; "
+        "no additional optimization is performed."
+    )
+
+    seed_results: list[dict[str, object]] = []
+    natural_bounds: np.ndarray | None = None
+
+    for optimizer_seed in optimizer_seeds:
+        print(f"\n--- Optimizer seed {optimizer_seed} ---")
+        model, coordinate_scaler, diagnostics = fit_gaussian_process(
+            sample_coordinates=model_sample_coordinates,
+            sample_values=sample_values,
+            kernel_mode=args.kernel_mode,
+            length_scale_lower_bound=args.length_scale_lower_bound,
+            length_scale_upper_bound=args.length_scale_upper_bound,
+            noise_level_initial=args.noise_level_initial,
+            noise_level_lower_bound=args.noise_level_lower_bound,
+            noise_level_upper_bound=args.noise_level_upper_bound,
+            target_transform=args.target_transform,
+            n_restarts=required_restarts,
+            optimizer_seed=optimizer_seed,
+        )
+        if len(diagnostics.optimizer_runs) != required_restarts + 1:
+            raise RuntimeError(
+                "Unexpected number of internal optimizer runs: "
+                f"{len(diagnostics.optimizer_runs)}."
+            )
+
+        natural_bounds = np.exp(model.kernel.bounds)
+        run_rows: list[dict[str, object]] = []
+        run_reconstructions = []
+
+        for run in diagnostics.optimizer_runs:
+            fixed_model, fixed_scaler = fit_gaussian_process_at_fixed_theta(
+                sample_coordinates=model_sample_coordinates,
+                sample_values=sample_values,
+                kernel_template=model.kernel,
+                theta=run.optimized_theta,
+                target_transform=args.target_transform,
+            )
+            fixed_lml = float(fixed_model.log_marginal_likelihood_value_)
+            if not np.isclose(fixed_lml, run.final_lml, rtol=1e-10, atol=1e-8):
+                raise RuntimeError(
+                    f"Fixed-theta LML mismatch for optimizer seed {optimizer_seed}, "
+                    f"run {run.run_index}: {fixed_lml} != {run.final_lml}."
+                )
+
+            reconstruction = reconstruct_field(
+                grid_data=grid_data,
+                model=fixed_model,
+                coordinate_scaler=fixed_scaler,
+                batch_size=args.prediction_batch_size,
+                target_transform=args.target_transform,
+                clip_negative=args.clip_negative,
+                coordinate_transform=coordinate_transform,
+            )
+            initial_kernel = model.kernel.clone_with_theta(run.initial_theta)
+            final_kernel = fixed_model.kernel_
+            initial_length_scales = np.asarray(
+                initial_kernel.k1.k2.length_scale,
+                dtype=float,
+            ).reshape(-1)
+            final_length_scales = np.asarray(
+                final_kernel.k1.k2.length_scale,
+                dtype=float,
+            ).reshape(-1)
+            optimized_values = np.exp(run.optimized_theta)
+            bound_labels: list[str] = []
+            parameter_labels = ("constant", "ell_parallel", "ell_perp", "white")
+            for parameter_index, parameter_label in enumerate(parameter_labels):
+                if np.isclose(
+                    optimized_values[parameter_index],
+                    natural_bounds[parameter_index, 0],
+                    rtol=1e-5,
+                    atol=1e-12,
+                ):
+                    bound_labels.append(f"{parameter_label}:lower")
+                elif np.isclose(
+                    optimized_values[parameter_index],
+                    natural_bounds[parameter_index, 1],
+                    rtol=1e-5,
+                    atol=1e-12,
+                ):
+                    bound_labels.append(f"{parameter_label}:upper")
+
+            run_rows.append(
+                {
+                    "run_index": run.run_index,
+                    "initial_constant": float(initial_kernel.k1.k1.constant_value),
+                    "initial_length_scales": initial_length_scales,
+                    "initial_white": float(initial_kernel.k2.noise_level),
+                    "initial_lml": run.initial_lml,
+                    "final_constant": float(final_kernel.k1.k1.constant_value),
+                    "final_length_scales": final_length_scales,
+                    "final_white": float(final_kernel.k2.noise_level),
+                    "final_lml": fixed_lml,
+                    "gradient_norm": float(np.linalg.norm(run.lml_gradient)),
+                    "bound_status": ",".join(bound_labels) if bound_labels else "none",
+                    "success": run.success,
+                    "iterations": run.iterations,
+                    "evaluations": run.function_evaluations,
+                    "rmse": reconstruction.rmse,
+                    "r2": reconstruction.r2,
+                }
+            )
+            run_reconstructions.append(reconstruction)
+
+        selected_index = diagnostics.selected_run_index
+        original_selected_reconstruction = reconstruct_field(
+            grid_data=grid_data,
+            model=model,
+            coordinate_scaler=coordinate_scaler,
+            batch_size=args.prediction_batch_size,
+            target_transform=args.target_transform,
+            clip_negative=args.clip_negative,
+            coordinate_transform=coordinate_transform,
+        )
+        fixed_selected_reconstruction = run_reconstructions[selected_index]
+        valid_mask = grid_data.valid_mask
+        theta_delta = float(
+            np.max(
+                np.abs(
+                    model.kernel_.theta
+                    - diagnostics.optimizer_runs[selected_index].optimized_theta
+                )
+            )
+        )
+        mean_delta = float(
+            np.max(
+                np.abs(
+                    original_selected_reconstruction.mean_field[valid_mask]
+                    - fixed_selected_reconstruction.mean_field[valid_mask]
+                )
+            )
+        )
+        std_delta = float(
+            np.max(
+                np.abs(
+                    original_selected_reconstruction.std_field[valid_mask]
+                    - fixed_selected_reconstruction.std_field[valid_mask]
+                )
+            )
+        )
+        lml_delta = abs(
+            diagnostics.final_lml - float(run_rows[selected_index]["final_lml"])
+        )
+        rmse_delta = abs(
+            original_selected_reconstruction.rmse
+            - fixed_selected_reconstruction.rmse
+        )
+        r2_delta = abs(
+            original_selected_reconstruction.r2 - fixed_selected_reconstruction.r2
+        )
+        if not (
+            theta_delta <= 1e-12
+            and lml_delta <= 1e-8
+            and mean_delta <= 1e-10
+            and std_delta <= 1e-10
+            and rmse_delta <= 1e-12
+            and r2_delta <= 1e-12
+        ):
+            raise RuntimeError(
+                "The fixed-theta reconstruction failed equivalence verification for "
+                f"optimizer seed {optimizer_seed}."
+            )
+
+        print(
+            "Fixed-theta equivalence for selected run: "
+            f"theta_delta={theta_delta:.3g}, LML_delta={lml_delta:.3g}, "
+            f"mean_delta={mean_delta:.3g}, std_delta={std_delta:.3g}, "
+            f"RMSE_delta={rmse_delta:.3g}, R2_delta={r2_delta:.3g}"
+        )
+
+        run_lml_values = np.asarray(
+            [float(row["final_lml"]) for row in run_rows],
+            dtype=float,
+        )
+        best_run_indices = np.asarray(
+            [int(np.argmax(run_lml_values[: budget + 1])) for budget in restart_budgets],
+            dtype=int,
+        )
+        best_lml_values = run_lml_values[best_run_indices]
+        best_rmse_values = np.asarray(
+            [float(run_rows[index]["rmse"]) for index in best_run_indices],
+            dtype=float,
+        )
+
+        print("\nInternal optimizer runs:")
+        print(
+            "  run  selected  initial C   initial ell_parallel  initial ell_perp  "
+            "initial W      final LML      final C  final ell_parallel  "
+            "final ell_perp  final W      RMSE       R2      bounds"
+        )
+        for row in run_rows:
+            run_index = int(row["run_index"])
+            initial_length_scales = np.asarray(row["initial_length_scales"])
+            final_length_scales = np.asarray(row["final_length_scales"])
+            print(
+                f"  {run_index:3d}  {str(run_index == selected_index):>8}  "
+                f"{float(row['initial_constant']):9.4g}   "
+                f"{initial_length_scales[0]:20.6g}  {initial_length_scales[1]:16.6g}  "
+                f"{float(row['initial_white']):9.3g}  "
+                f"{float(row['final_lml']):13.5f}  "
+                f"{float(row['final_constant']):9.5g}  "
+                f"{final_length_scales[0]:18.6g}  {final_length_scales[1]:14.6g}  "
+                f"{float(row['final_white']):9.3g}  "
+                f"{float(row['rmse']):9.6f}  {float(row['r2']):8.5f}  "
+                f"{row['bound_status']}"
+            )
+
+        print("\nNested restart budgets:")
+        print("  n_restarts  total runs  best run    best LML      selected RMSE")
+        for budget_index, budget in enumerate(restart_budgets):
+            print(
+                f"  {budget:10d}  {budget + 1:10d}  "
+                f"{best_run_indices[budget_index]:8d}  "
+                f"{best_lml_values[budget_index]:12.5f}  "
+                f"{best_rmse_values[budget_index]:13.6f}"
+            )
+
+        best_lml = float(best_lml_values[-1])
+        if best_lml > controlled_initialization_lml + 1e-3:
+            comparison_status = "exceeded the controlled-initialization LML"
+        elif np.isclose(
+            best_lml,
+            controlled_initialization_lml,
+            rtol=0.0,
+            atol=1e-2,
+        ):
+            comparison_status = "recovered the controlled-initialization basin"
+        else:
+            comparison_status = (
+                "did not recover the controlled-initialization basin in this "
+                "seven-restart sequence"
+            )
+        print(
+            f"Controlled-initialization comparison: {comparison_status} "
+            f"(best random-restart LML={best_lml:.6f})"
+        )
+
+        seed_results.append(
+            {
+                "optimizer_seed": optimizer_seed,
+                "rows": run_rows,
+                "selected_index": selected_index,
+                "best_run_indices": best_run_indices,
+                "best_lml_values": best_lml_values,
+            }
+        )
+
+    if len(seed_results) > 1:
+        default_rows = [result["rows"][0] for result in seed_results]
+        default_lml_values = np.asarray(
+            [float(row["final_lml"]) for row in default_rows],
+            dtype=float,
+        )
+        default_rmse_values = np.asarray(
+            [float(row["rmse"]) for row in default_rows],
+            dtype=float,
+        )
+        if not (
+            np.allclose(default_lml_values, default_lml_values[0], rtol=0.0, atol=1e-10)
+            and np.allclose(
+                default_rmse_values,
+                default_rmse_values[0],
+                rtol=0.0,
+                atol=1e-12,
+            )
+        ):
+            raise RuntimeError(
+                "The deterministic default run changed across optimizer seeds."
+            )
+        print(
+            "\nDefault-run reproducibility across optimizer seeds: verified "
+            f"(LML={default_lml_values[0]:.8g}, RMSE={default_rmse_values[0]:.8g})."
+        )
+
+    run_lml_matrix = np.vstack(
+        [
+            [float(row["final_lml"]) for row in result["rows"]]
+            for result in seed_results
+        ]
+    )
+    run_rmse_matrix = np.vstack(
+        [
+            [float(row["rmse"]) for row in result["rows"]]
+            for result in seed_results
+        ]
+    )
+    best_lml_matrix = np.vstack(
+        [np.asarray(result["best_lml_values"], dtype=float) for result in seed_results]
+    )
+    selected_run_indices = [
+        int(result["selected_index"]) for result in seed_results
+    ]
+    figure_paths = plot_optimizer_restart_study(
+        optimizer_seeds=optimizer_seeds,
+        run_lml_matrix=run_lml_matrix,
+        run_rmse_matrix=run_rmse_matrix,
+        selected_run_indices=selected_run_indices,
+        restart_budgets=restart_budgets,
+        best_lml_matrix=best_lml_matrix,
+        controlled_initialization_lml=controlled_initialization_lml,
+        controlled_initialization_rmse=controlled_initialization_rmse,
+        output_path=output_path,
+        show=args.show,
+    )
+    print("\nSaved optimizer restart study figures:")
+    for figure_path in figure_paths:
+        print(f"  - {figure_path}")
 
 
 def fit_and_reconstruct_samples(
