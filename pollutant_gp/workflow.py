@@ -40,6 +40,7 @@ from pollutant_gp.visualization import (
     plot_kernel_comparison_multiseed,
     plot_kernel_comparison_multiseed_panels,
     plot_length_scale_lower_bound_study,
+    plot_optimizer_initialization_study,
     plot_reconstruction,
     plot_reconstruction_panels,
     plot_sample_size_study,
@@ -249,6 +250,26 @@ def make_length_scale_lower_bound_study_path(
     return output_dir / file_name
 
 
+def make_optimizer_initialization_study_path(
+    output_dir: Path,
+    figure_name: str | None,
+    nc_file: Path,
+    time_index: int | None,
+    n_samples: int,
+) -> Path:
+    if figure_name:
+        return output_dir / figure_name
+
+    dataset_name = nc_file.stem
+    time_part = f"time_{time_index}" if time_index is not None else "no_time"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = (
+        f"{dataset_name}_{time_part}_samples_{n_samples}_"
+        f"optimizer_initialization_study_{timestamp}.png"
+    )
+    return output_dir / file_name
+
+
 def build_wind_coordinate_transform(
     args: argparse.Namespace,
     grid_data,
@@ -450,6 +471,7 @@ def run_workflow(args: argparse.Namespace) -> None:
         print(f"Optimizer restarts: {args.n_restarts}")
         print(f"Kernel mode: {args.kernel_mode}")
         print(f"Length-scale lower-bound study: {args.length_scale_lower_bound_study}")
+        print(f"Optimizer initialization study: {args.optimizer_initialization_study}")
         print(f"Kernel comparison study: {args.kernel_comparison_study}")
         if args.kernel_comparison_study:
             print("Physically informed rotation: evaluated inside the kernel comparison study")
@@ -521,6 +543,28 @@ def run_workflow(args: argparse.Namespace) -> None:
         return
 
     coordinate_transform = build_coordinate_transform(args, grid_data)
+
+    if args.optimizer_initialization_study and args.length_scale_lower_bound_study:
+        raise ValueError(
+            "Choose either --optimizer-initialization-study or "
+            "--length-scale-lower-bound-study, not both."
+        )
+
+    if args.optimizer_initialization_study:
+        study_path = make_optimizer_initialization_study_path(
+            output_dir=args.output_dir,
+            figure_name=args.figure_name,
+            nc_file=args.nc_file,
+            time_index=time_index,
+            n_samples=args.n_samples,
+        )
+        run_optimizer_initialization_study(
+            args=args,
+            grid_data=grid_data,
+            output_path=study_path,
+            coordinate_transform=coordinate_transform,
+        )
+        return
 
     if args.length_scale_lower_bound_study:
         study_path = make_length_scale_lower_bound_study_path(
@@ -819,6 +863,202 @@ def run_length_scale_lower_bound_study(
     print("\nSaved lower-bound sensitivity figures:")
     print(f"  - {model_fit_path}")
     print(f"  - {length_scales_path}")
+
+
+# Compare deterministic kernel initializations while holding data and bounds fixed.
+def run_optimizer_initialization_study(
+    args: argparse.Namespace,
+    grid_data,
+    output_path: Path,
+    coordinate_transform: RotationTransform | None,
+) -> None:
+    if args.n_restarts != 0:
+        raise ValueError(
+            "The controlled initialization study requires --n-restarts 0."
+        )
+    if args.kernel_mode != "anisotropic":
+        raise ValueError(
+            "The controlled initialization study requires --kernel-mode anisotropic."
+        )
+    if coordinate_transform is None:
+        raise ValueError(
+            "The controlled initialization study requires a physically informed "
+            "coordinate transform."
+        )
+
+    profiles = (
+        ("Default", 1.0, np.array([1.0, 1.0]), 1e-4),
+        ("Short-scale", 1.0, np.array([0.10, 0.10]), 1e-4),
+        ("Physical anisotropic", 1.0, np.array([0.70, 0.075]), 1e-4),
+        ("Previous-regime", 0.35, np.array([0.70, 0.075]), 0.65),
+    )
+
+    sample_coordinates, sample_values, _ = sample_sensor_points(
+        grid_data=grid_data,
+        n_samples=args.n_samples,
+        noise_std=args.noise_std,
+        random_seed=args.random_seed,
+    )
+    model_sample_coordinates = maybe_transform_coordinates(
+        sample_coordinates,
+        coordinate_transform,
+    )
+    optimizer_seed = resolve_optimizer_seed(args, args.random_seed)
+
+    print("\n=== Controlled optimizer initialization study ===")
+    print(f"Shared sampling seed: {args.random_seed}")
+    print(f"Shared optimizer seed: {optimizer_seed}")
+    print(f"Shared sensor count: {args.n_samples}")
+    print(
+        "Shared length-scale bounds: "
+        f"[{args.length_scale_lower_bound:g}, {args.length_scale_upper_bound:g}]"
+    )
+    print("Optimizer restarts: 0")
+    print("Sampling design: identical sensor coordinates and values for every profile.")
+    print("\nInitial profiles:")
+    print("  profile                 Constant   ell_parallel   ell_perp   WhiteKernel")
+    for label, constant_initial, length_initial, noise_initial in profiles:
+        print(
+            f"  {label:<23} {constant_initial:8.4g}   "
+            f"{length_initial[0]:12.6g}   {length_initial[1]:8.6g}   "
+            f"{noise_initial:11.6g}"
+        )
+
+    final_lml_values: list[float] = []
+    rmse_values: list[float] = []
+    r2_values: list[float] = []
+    constant_kernel_values: list[float] = []
+    white_kernel_values: list[float] = []
+    standardized_length_scale_rows: list[np.ndarray] = []
+    physical_length_scale_rows: list[np.ndarray] = []
+    lower_bound_hits: list[bool] = []
+    optimizer_successes: list[bool] = []
+    optimizer_iterations: list[int | None] = []
+    reconstructed_fields: list[np.ndarray] = []
+
+    for label, constant_initial, length_initial, noise_initial in profiles:
+        print(f"\n  Profile = {label}")
+        model, coordinate_scaler, diagnostics = fit_gaussian_process(
+            sample_coordinates=model_sample_coordinates,
+            sample_values=sample_values,
+            kernel_mode=args.kernel_mode,
+            length_scale_lower_bound=args.length_scale_lower_bound,
+            length_scale_upper_bound=args.length_scale_upper_bound,
+            noise_level_initial=noise_initial,
+            noise_level_lower_bound=args.noise_level_lower_bound,
+            noise_level_upper_bound=args.noise_level_upper_bound,
+            target_transform=args.target_transform,
+            n_restarts=0,
+            optimizer_seed=optimizer_seed,
+            constant_value_initial=constant_initial,
+            length_scale_initial=length_initial,
+        )
+        reconstruction = reconstruct_field(
+            grid_data=grid_data,
+            model=model,
+            coordinate_scaler=coordinate_scaler,
+            batch_size=args.prediction_batch_size,
+            target_transform=args.target_transform,
+            clip_negative=args.clip_negative,
+            coordinate_transform=coordinate_transform,
+        )
+        selected_run = diagnostics.optimizer_runs[diagnostics.selected_run_index]
+
+        print(f"    Learned kernel: {model.kernel_}")
+        print(
+            f"    LML: {diagnostics.initial_lml:.8g} -> {diagnostics.final_lml:.8g}; "
+            f"gradient norm={diagnostics.final_lml_gradient_norm:.6g}"
+        )
+        print(
+            "    Standardized length scales: "
+            f"{format_diagnostic_vector(diagnostics.standardized_length_scales)}"
+        )
+        print(
+            "    Length scales in coordinate units: "
+            f"{format_diagnostic_vector(diagnostics.physical_length_scales)}"
+        )
+        print(
+            f"    Bound hit: lower={diagnostics.length_scale_lower_bound_hit}, "
+            f"upper={diagnostics.length_scale_upper_bound_hit}"
+        )
+        print(
+            f"    Optimizer: success={selected_run.success}, status={selected_run.status}, "
+            f"iterations={selected_run.iterations}, "
+            f"evaluations={selected_run.function_evaluations}"
+        )
+        print(f"    Termination: {selected_run.message}")
+        print(
+            f"    Metrics: RMSE={reconstruction.rmse:.8g}, "
+            f"MAE={reconstruction.mae:.8g}, R2={reconstruction.r2:.8g}"
+        )
+
+        final_lml_values.append(diagnostics.final_lml)
+        rmse_values.append(reconstruction.rmse)
+        r2_values.append(reconstruction.r2)
+        constant_kernel_values.append(float(model.kernel_.k1.k1.constant_value))
+        white_kernel_values.append(float(model.kernel_.k2.noise_level))
+        standardized_length_scale_rows.append(diagnostics.standardized_length_scales)
+        physical_length_scale_rows.append(diagnostics.physical_length_scales)
+        lower_bound_hits.append(diagnostics.length_scale_lower_bound_hit)
+        optimizer_successes.append(selected_run.success)
+        optimizer_iterations.append(selected_run.iterations)
+        reconstructed_fields.append(reconstruction.mean_field.copy())
+
+    standardized_length_scales = np.vstack(standardized_length_scale_rows)
+    physical_length_scales = np.vstack(physical_length_scale_rows)
+    baseline_field = reconstructed_fields[0]
+    maximum_map_differences = [
+        float(
+            np.max(
+                np.abs(field[grid_data.valid_mask] - baseline_field[grid_data.valid_mask])
+            )
+        )
+        for field in reconstructed_fields
+    ]
+
+    print("\n=== Optimizer initialization study summary ===")
+    print(
+        "  profile                    final LML       RMSE        R2   "
+        "Constant   ell_parallel   ell_perp   WhiteKernel   lower hit   "
+        "iterations   max map delta"
+    )
+    for index, (label, _, _, _) in enumerate(profiles):
+        iterations = optimizer_iterations[index]
+        iteration_label = "n/a" if iterations is None else str(iterations)
+        print(
+            f"  {label:<23} {final_lml_values[index]:13.5f}  "
+            f"{rmse_values[index]:9.6f}  {r2_values[index]:8.5f}  "
+            f"{constant_kernel_values[index]:8.5f}   "
+            f"{standardized_length_scales[index, 0]:12.6f}   "
+            f"{standardized_length_scales[index, 1]:8.6f}   "
+            f"{white_kernel_values[index]:11.6f}   "
+            f"{str(lower_bound_hits[index]):>9}   "
+            f"{iteration_label:>10}   {maximum_map_differences[index]:13.6g}"
+        )
+        if not optimizer_successes[index]:
+            print(f"    Warning: optimizer failure for profile {label}.")
+
+    print("\nPhysical length scales in coordinate units:")
+    for index, (label, _, _, _) in enumerate(profiles):
+        print(
+            f"  - {label}: parallel={physical_length_scales[index, 0]:.6g}, "
+            f"perpendicular={physical_length_scales[index, 1]:.6g}"
+        )
+
+    model_fit_path, hyperparameter_path = plot_optimizer_initialization_study(
+        profile_labels=[profile[0] for profile in profiles],
+        final_lml_values=final_lml_values,
+        rmse_values=rmse_values,
+        standardized_length_scales=standardized_length_scales,
+        constant_kernel_values=constant_kernel_values,
+        white_kernel_values=white_kernel_values,
+        length_scale_lower_bound=args.length_scale_lower_bound,
+        output_path=output_path,
+        show=args.show,
+    )
+    print("\nSaved optimizer initialization study figures:")
+    print(f"  - {model_fit_path}")
+    print(f"  - {hyperparameter_path}")
 
 
 def fit_and_reconstruct_samples(

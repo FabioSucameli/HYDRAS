@@ -243,6 +243,14 @@ def parse_args() -> argparse.Namespace:
         help="Lower-bound values used by --length-scale-lower-bound-study.",
     )
     parser.add_argument(
+        "--optimizer-initialization-study",
+        action="store_true",
+        help=(
+            "Run a controlled comparison of four deterministic GP kernel "
+            "initializations using one shared sensor sample."
+        ),
+    )
+    parser.add_argument(
         "--noise-level-initial",
         type=float,
         default=1e-4,

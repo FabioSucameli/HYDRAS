@@ -187,17 +187,44 @@ def build_kernel(
     noise_level_initial: float,
     noise_level_lower_bound: float,
     noise_level_upper_bound: float,
+    constant_value_initial: float = 1.0,
+    length_scale_initial: float | np.ndarray | None = None,
 ):
-    
+    if constant_value_initial <= 0.0:
+        raise ValueError("The ConstantKernel initial value must be positive.")
+
+    requested_length_scales = (
+        None
+        if length_scale_initial is None
+        else np.asarray(length_scale_initial, dtype=float).reshape(-1)
+    )
     if kernel_mode == "anisotropic":
-        length_scale = np.ones(n_features)
+        if requested_length_scales is None:
+            length_scale = np.ones(n_features)
+        elif requested_length_scales.size == 1:
+            length_scale = np.repeat(requested_length_scales, n_features)
+        elif requested_length_scales.size == n_features:
+            length_scale = requested_length_scales
+        else:
+            raise ValueError(
+                f"An anisotropic kernel with {n_features} features requires one or "
+                f"{n_features} initial length scales."
+            )
     elif kernel_mode == "isotropic":
-        length_scale = 1.0
+        if requested_length_scales is None:
+            length_scale = 1.0
+        elif requested_length_scales.size == 1:
+            length_scale = float(requested_length_scales[0])
+        else:
+            raise ValueError("An isotropic kernel requires one initial length scale.")
     else:
         raise ValueError(f"Unknown kernel mode: {kernel_mode}")
 
+    if np.any(np.asarray(length_scale) <= 0.0):
+        raise ValueError("All initial length scales must be positive.")
+
     return (
-        ConstantKernel(1.0, (1e-3, 1e3))
+        ConstantKernel(constant_value_initial, (1e-3, 1e3))
         * RBF(
             length_scale=length_scale,
             length_scale_bounds=(length_scale_lower_bound, length_scale_upper_bound),
@@ -223,6 +250,8 @@ def fit_gaussian_process(
     target_transform: str,
     n_restarts: int,
     optimizer_seed: int,
+    constant_value_initial: float = 1.0,
+    length_scale_initial: float | np.ndarray | None = None,
 ) -> tuple[GaussianProcessRegressor, StandardScaler, GPOptimizationDiagnostics]:
     
     # Standardize spatial coordinates.
@@ -241,6 +270,8 @@ def fit_gaussian_process(
         noise_level_initial=noise_level_initial,
         noise_level_lower_bound=noise_level_lower_bound,
         noise_level_upper_bound=noise_level_upper_bound,
+        constant_value_initial=constant_value_initial,
+        length_scale_initial=length_scale_initial,
     )
     initial_theta = kernel.theta.copy()
     original_bounds = np.exp(kernel.bounds)

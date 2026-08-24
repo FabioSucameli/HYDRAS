@@ -455,6 +455,115 @@ def plot_length_scale_lower_bound_study(
     return model_fit_path, length_scales_path
 
 
+# Plot final fit quality and optimized hyperparameters for deterministic initializations.
+def plot_optimizer_initialization_study(
+    profile_labels: Sequence[str],
+    final_lml_values: Sequence[float],
+    rmse_values: Sequence[float],
+    standardized_length_scales: np.ndarray,
+    constant_kernel_values: Sequence[float],
+    white_kernel_values: Sequence[float],
+    length_scale_lower_bound: float,
+    output_path: Path,
+    show: bool,
+) -> tuple[Path, Path]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x = np.arange(len(profile_labels))
+    standardized_length_scales = np.asarray(standardized_length_scales, dtype=float)
+    model_fit_path = _panel_output_path(output_path, "model_fit")
+    hyperparameter_path = _panel_output_path(output_path, "optimized_hyperparameters")
+
+    fit_figure, fit_axes = plt.subplots(1, 2, figsize=(11, 4.5), constrained_layout=True)
+    fit_panels = (
+        (fit_axes[0], final_lml_values, "Final log-marginal likelihood", "#0072B2"),
+        (fit_axes[1], rmse_values, "RMSE", "#D55E00"),
+    )
+    for axis, values, ylabel, color in fit_panels:
+        axis.plot(x, values, "o-", color=color, linewidth=2.0, markersize=7)
+        axis.set_xticks(x, profile_labels, rotation=15, ha="right")
+        axis.set_ylabel(ylabel)
+        axis.set_title(ylabel)
+        axis.grid(True, axis="y", linestyle="-", alpha=0.25)
+
+    fit_figure.suptitle("GP optimizer sensitivity to kernel initialization")
+    fit_figure.savefig(model_fit_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(fit_figure)
+
+    hyper_figure, hyper_axes = plt.subplots(
+        1,
+        2,
+        figsize=(11, 4.5),
+        constrained_layout=True,
+    )
+    length_axis, variance_axis = hyper_axes
+    length_axis.axhline(
+        length_scale_lower_bound,
+        color="#222222",
+        linestyle="--",
+        linewidth=1.5,
+        label="Lower bound",
+    )
+    length_axis.plot(
+        x,
+        standardized_length_scales[:, 0],
+        "o-",
+        color="#0072B2",
+        linewidth=2.0,
+        markersize=7,
+        label="Along transport",
+    )
+    length_axis.plot(
+        x,
+        standardized_length_scales[:, 1],
+        "o-",
+        color="#CC79A7",
+        linewidth=2.0,
+        markersize=7,
+        label="Across transport",
+    )
+    length_axis.set_xticks(x, profile_labels, rotation=15, ha="right")
+    length_axis.set_ylabel("Optimized length scale (standardized coordinates)")
+    length_axis.set_title("Optimized RBF length-scales")
+    length_axis.grid(True, axis="y", linestyle="-", alpha=0.25)
+    length_axis.legend(fontsize=9)
+
+    variance_axis.plot(
+        x,
+        constant_kernel_values,
+        "o-",
+        color="#009E73",
+        linewidth=2.0,
+        markersize=7,
+        label="ConstantKernel",
+    )
+    variance_axis.plot(
+        x,
+        white_kernel_values,
+        "o-",
+        color="#E69F00",
+        linewidth=2.0,
+        markersize=7,
+        label="WhiteKernel",
+    )
+    variance_axis.set_xticks(x, profile_labels, rotation=15, ha="right")
+    variance_axis.set_ylabel("Optimized kernel value")
+    variance_axis.set_title("Optimized variance levels")
+    variance_axis.set_yscale("log")
+    variance_axis.grid(True, which="both", axis="y", linestyle="-", alpha=0.25)
+    variance_axis.legend(fontsize=9)
+
+    hyper_figure.suptitle("Optimized kernel hyperparameters")
+    hyper_figure.savefig(hyperparameter_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(hyper_figure)
+
+    return model_fit_path, hyperparameter_path
+
+
 # Multi-seed sample size study
 
 # Plot the sample size study averaged over multiple random seeds.
