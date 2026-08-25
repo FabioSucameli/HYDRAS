@@ -455,6 +455,148 @@ def plot_length_scale_lower_bound_study(
     return model_fit_path, length_scales_path
 
 
+# Plot fit quality and solution stability across length-scale upper bounds.
+def plot_length_scale_upper_bound_study(
+    upper_bounds: Sequence[float],
+    profile_labels: Sequence[str],
+    lml_matrix: np.ndarray,
+    rmse_matrix: np.ndarray,
+    standardized_length_scales: np.ndarray,
+    map_delta_matrix: np.ndarray,
+    output_path: Path,
+    show: bool,
+) -> tuple[Path, Path]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x = np.asarray(upper_bounds, dtype=float)
+    lml_matrix = np.asarray(lml_matrix, dtype=float)
+    rmse_matrix = np.asarray(rmse_matrix, dtype=float)
+    standardized_length_scales = np.asarray(standardized_length_scales, dtype=float)
+    map_delta_matrix = np.asarray(map_delta_matrix, dtype=float)
+    colors = ("#0072B2", "#D55E00")
+    markers = ("o", "s")
+
+    model_fit_path = _panel_output_path(output_path, "model_fit")
+    stability_path = _panel_output_path(output_path, "solution_stability")
+
+    fit_figure, fit_axes = plt.subplots(1, 2, figsize=(10.8, 4.4), constrained_layout=True)
+    for profile_index, profile_label in enumerate(profile_labels):
+        color = colors[profile_index % len(colors)]
+        marker = markers[profile_index % len(markers)]
+        fit_axes[0].plot(
+            x,
+            lml_matrix[profile_index],
+            marker=marker,
+            color=color,
+            linewidth=2.0,
+            markersize=7,
+            label=profile_label,
+        )
+        fit_axes[1].plot(
+            x,
+            rmse_matrix[profile_index],
+            marker=marker,
+            color=color,
+            linewidth=2.0,
+            markersize=7,
+            label=profile_label,
+        )
+    for axis, ylabel in zip(
+        fit_axes,
+        ("Final log-marginal likelihood", "RMSE"),
+        strict=True,
+    ):
+        axis.set_xscale("log")
+        axis.set_xticks(x)
+        axis.set_xticklabels([f"{value:g}" for value in x])
+        axis.set_xlabel("Length-scale upper bound (standardized coordinates)")
+        axis.set_ylabel(ylabel)
+        axis.set_title(f"{ylabel} vs upper bound")
+        axis.grid(True, which="both", linestyle="-", alpha=0.25)
+        axis.legend(fontsize=9)
+    fit_figure.suptitle("Length-scale upper-bound sensitivity of model fit")
+    fit_figure.savefig(model_fit_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(fit_figure)
+
+    stability_figure, stability_axes = plt.subplots(
+        1,
+        2,
+        figsize=(12.5, 4.6),
+        constrained_layout=True,
+    )
+    length_axis, map_axis = stability_axes
+    length_axis.plot(
+        x,
+        x,
+        color="#222222",
+        linestyle=":",
+        linewidth=1.5,
+        label="Imposed upper bound",
+    )
+    for profile_index, profile_label in enumerate(profile_labels):
+        color = colors[profile_index % len(colors)]
+        marker = markers[profile_index % len(markers)]
+        length_axis.plot(
+            x,
+            standardized_length_scales[profile_index, :, 0],
+            marker=marker,
+            color=color,
+            linestyle="-",
+            linewidth=2.0,
+            markersize=7,
+            label=f"{profile_label}: along transport",
+        )
+        length_axis.plot(
+            x,
+            standardized_length_scales[profile_index, :, 1],
+            marker=marker,
+            color=color,
+            linestyle="--",
+            linewidth=1.8,
+            markersize=6,
+            label=f"{profile_label}: across transport",
+        )
+        map_axis.plot(
+            x,
+            np.maximum(map_delta_matrix[profile_index], 1e-12),
+            marker=marker,
+            color=color,
+            linewidth=2.0,
+            markersize=7,
+            label=profile_label,
+        )
+
+    length_axis.set_xscale("log")
+    length_axis.set_yscale("log")
+    length_axis.set_xticks(x)
+    length_axis.set_xticklabels([f"{value:g}" for value in x])
+    length_axis.set_xlabel("Length-scale upper bound (standardized coordinates)")
+    length_axis.set_ylabel("Optimized length scale (standardized coordinates)")
+    length_axis.set_title("Learned length-scales")
+    length_axis.grid(True, which="both", linestyle="-", alpha=0.25)
+    length_axis.legend(fontsize=8)
+
+    map_axis.set_xscale("log")
+    map_axis.set_yscale("log")
+    map_axis.set_xticks(x)
+    map_axis.set_xticklabels([f"{value:g}" for value in x])
+    map_axis.set_xlabel("Length-scale upper bound (standardized coordinates)")
+    map_axis.set_ylabel("Maximum map difference vs UB=100 (floor: 1e-12)")
+    map_axis.set_title("Reconstruction stability")
+    map_axis.grid(True, which="both", linestyle="-", alpha=0.25)
+    map_axis.legend(fontsize=9)
+
+    stability_figure.suptitle("Upper-bound activity and solution stability")
+    stability_figure.savefig(stability_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(stability_figure)
+
+    return model_fit_path, stability_path
+
+
 # Plot final fit quality and optimized hyperparameters for deterministic initializations.
 def plot_optimizer_initialization_study(
     profile_labels: Sequence[str],

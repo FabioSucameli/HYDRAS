@@ -44,6 +44,7 @@ from pollutant_gp.visualization import (
     plot_kernel_comparison_multiseed,
     plot_kernel_comparison_multiseed_panels,
     plot_length_scale_lower_bound_study,
+    plot_length_scale_upper_bound_study,
     plot_optimizer_initialization_study,
     plot_optimizer_restart_study,
     plot_reconstruction,
@@ -251,6 +252,26 @@ def make_length_scale_lower_bound_study_path(
     file_name = (
         f"{dataset_name}_{time_part}_samples_{n_samples}_"
         f"lower_bound_study_{timestamp}.png"
+    )
+    return output_dir / file_name
+
+
+def make_length_scale_upper_bound_study_path(
+    output_dir: Path,
+    figure_name: str | None,
+    nc_file: Path,
+    time_index: int | None,
+    n_samples: int,
+) -> Path:
+    if figure_name:
+        return output_dir / figure_name
+
+    dataset_name = nc_file.stem
+    time_part = f"time_{time_index}" if time_index is not None else "no_time"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = (
+        f"{dataset_name}_{time_part}_samples_{n_samples}_"
+        f"upper_bound_study_{timestamp}.png"
     )
     return output_dir / file_name
 
@@ -496,6 +517,7 @@ def run_workflow(args: argparse.Namespace) -> None:
         print(f"Optimizer restarts: {args.n_restarts}")
         print(f"Kernel mode: {args.kernel_mode}")
         print(f"Length-scale lower-bound study: {args.length_scale_lower_bound_study}")
+        print(f"Length-scale upper-bound study: {args.length_scale_upper_bound_study}")
         print(f"Optimizer initialization study: {args.optimizer_initialization_study}")
         print(f"Optimizer restart study: {args.optimizer_restart_study}")
         if args.optimizer_restart_study:
@@ -577,6 +599,7 @@ def run_workflow(args: argparse.Namespace) -> None:
             args.optimizer_initialization_study,
             args.optimizer_restart_study,
             args.length_scale_lower_bound_study,
+            args.length_scale_upper_bound_study,
         )
     )
     if controlled_optimizer_study_count > 1:
@@ -593,6 +616,22 @@ def run_workflow(args: argparse.Namespace) -> None:
             n_samples=args.n_samples,
         )
         run_optimizer_restart_study(
+            args=args,
+            grid_data=grid_data,
+            output_path=study_path,
+            coordinate_transform=coordinate_transform,
+        )
+        return
+
+    if args.length_scale_upper_bound_study:
+        study_path = make_length_scale_upper_bound_study_path(
+            output_dir=args.output_dir,
+            figure_name=args.figure_name,
+            nc_file=args.nc_file,
+            time_index=time_index,
+            n_samples=args.n_samples,
+        )
+        run_length_scale_upper_bound_study(
             args=args,
             grid_data=grid_data,
             output_path=study_path,
@@ -913,6 +952,320 @@ def run_length_scale_lower_bound_study(
     print("\nSaved lower-bound sensitivity figures:")
     print(f"  - {model_fit_path}")
     print(f"  - {length_scales_path}")
+
+
+# Compare upper bounds for two deterministic initializations using shared observations.
+def run_length_scale_upper_bound_study(
+    args: argparse.Namespace,
+    grid_data,
+    output_path: Path,
+    coordinate_transform: RotationTransform | None,
+) -> None:
+    if args.n_restarts != 0:
+        raise ValueError("The controlled upper-bound study requires --n-restarts 0.")
+    if args.kernel_mode != "anisotropic":
+        raise ValueError("The controlled upper-bound study requires --kernel-mode anisotropic.")
+    if coordinate_transform is None:
+        raise ValueError(
+            "The controlled upper-bound study requires a physically informed "
+            "coordinate transform."
+        )
+
+    upper_bounds = sorted(set(args.length_scale_upper_bound_study_values))
+    if not upper_bounds:
+        raise ValueError("At least one upper-bound study value is required.")
+    if any(value <= args.length_scale_lower_bound for value in upper_bounds):
+        raise ValueError(
+            "Every upper-bound study value must exceed --length-scale-lower-bound."
+        )
+
+    profiles = (
+        ("Default", 1.0, np.array([1.0, 1.0]), 1e-4),
+        ("Short-scale", 1.0, np.array([0.10, 0.10]), 1e-4),
+    )
+    largest_initial_length_scale = max(
+        float(np.max(profile[2])) for profile in profiles
+    )
+    if upper_bounds[0] < largest_initial_length_scale:
+        raise ValueError(
+            "The smallest upper bound must include every tested initial length scale; "
+            f"expected at least {largest_initial_length_scale:g}."
+        )
+
+    sample_coordinates, sample_values, _ = sample_sensor_points(
+        grid_data=grid_data,
+        n_samples=args.n_samples,
+        noise_std=args.noise_std,
+        random_seed=args.random_seed,
+    )
+    model_sample_coordinates = maybe_transform_coordinates(
+        sample_coordinates,
+        coordinate_transform,
+    )
+    optimizer_seed = resolve_optimizer_seed(args, args.random_seed)
+
+    print("\n=== Controlled length-scale upper-bound study ===")
+    print(f"Upper bounds: {format_diagnostic_vector(np.asarray(upper_bounds))}")
+    print(f"Shared lower bound: {args.length_scale_lower_bound:g}")
+    print(f"Shared sampling seed: {args.random_seed}")
+    print(f"Shared optimizer seed: {optimizer_seed}")
+    print(f"Shared sensor count: {args.n_samples}")
+    print("Optimizer restarts: 0")
+    print("Sampling design: identical sensor coordinates and values for every fit.")
+    print(
+        "Invariance tolerances: theta rtol=1e-5/atol=1e-7, "
+        "LML atol=1e-5, maximum map difference atol=1e-6."
+    )
+
+    profile_results: list[dict[str, object]] = []
+    for label, constant_initial, length_initial, noise_initial in profiles:
+        print(f"\n--- Initialization profile: {label} ---")
+        rows: list[dict[str, object]] = []
+        reconstructed_fields: list[np.ndarray] = []
+
+        for upper_bound in upper_bounds:
+            model, coordinate_scaler, diagnostics = fit_gaussian_process(
+                sample_coordinates=model_sample_coordinates,
+                sample_values=sample_values,
+                kernel_mode=args.kernel_mode,
+                length_scale_lower_bound=args.length_scale_lower_bound,
+                length_scale_upper_bound=upper_bound,
+                noise_level_initial=noise_initial,
+                noise_level_lower_bound=args.noise_level_lower_bound,
+                noise_level_upper_bound=args.noise_level_upper_bound,
+                target_transform=args.target_transform,
+                n_restarts=0,
+                optimizer_seed=optimizer_seed,
+                constant_value_initial=constant_initial,
+                length_scale_initial=length_initial,
+            )
+            reconstruction = reconstruct_field(
+                grid_data=grid_data,
+                model=model,
+                coordinate_scaler=coordinate_scaler,
+                batch_size=args.prediction_batch_size,
+                target_transform=args.target_transform,
+                clip_negative=args.clip_negative,
+                coordinate_transform=coordinate_transform,
+            )
+            selected_run = diagnostics.optimizer_runs[diagnostics.selected_run_index]
+            rows.append(
+                {
+                    "upper_bound": upper_bound,
+                    "theta": model.kernel_.theta.copy(),
+                    "lml": diagnostics.final_lml,
+                    "rmse": reconstruction.rmse,
+                    "r2": reconstruction.r2,
+                    "constant": float(model.kernel_.k1.k1.constant_value),
+                    "length_scales": diagnostics.standardized_length_scales.copy(),
+                    "physical_length_scales": diagnostics.physical_length_scales.copy(),
+                    "white": float(model.kernel_.k2.noise_level),
+                    "lower_hit": diagnostics.length_scale_lower_bound_hit,
+                    "upper_hit": diagnostics.length_scale_upper_bound_hit,
+                    "optimizer_success": selected_run.success,
+                }
+            )
+            reconstructed_fields.append(reconstruction.mean_field.copy())
+
+        reference_row = rows[-1]
+        reference_field = reconstructed_fields[-1]
+        previous_field: np.ndarray | None = None
+        for row, field in zip(rows, reconstructed_fields, strict=True):
+            row["map_delta_reference"] = float(
+                np.max(
+                    np.abs(
+                        field[grid_data.valid_mask]
+                        - reference_field[grid_data.valid_mask]
+                    )
+                )
+            )
+            row["map_delta_previous"] = (
+                0.0
+                if previous_field is None
+                else float(
+                    np.max(
+                        np.abs(
+                            field[grid_data.valid_mask]
+                            - previous_field[grid_data.valid_mask]
+                        )
+                    )
+                )
+            )
+            previous_field = field
+
+        smallest_reference_equivalent_upper_bound: float | None = None
+        # Exclude the largest tested value: it is the reference, so equivalence
+        # with itself cannot establish that its bound is inactive.
+        for candidate_index, candidate_upper_bound in enumerate(upper_bounds[:-1]):
+            candidate_is_reference_equivalent = all(
+                not bool(row["upper_hit"])
+                and np.allclose(
+                    np.asarray(row["theta"]),
+                    np.asarray(reference_row["theta"]),
+                    rtol=1e-5,
+                    atol=1e-7,
+                )
+                and abs(float(row["lml"]) - float(reference_row["lml"])) <= 1e-5
+                and float(row["map_delta_reference"]) <= 1e-6
+                for row in rows[candidate_index:]
+            )
+            if candidate_is_reference_equivalent:
+                smallest_reference_equivalent_upper_bound = candidate_upper_bound
+                break
+
+        equivalent_groups: list[tuple[float, float]] = []
+        group_start = 0
+        for row_index in range(1, len(rows) + 1):
+            group_ended = row_index == len(rows)
+            if not group_ended:
+                current_row = rows[row_index]
+                previous_row = rows[row_index - 1]
+                group_ended = not (
+                    np.allclose(
+                        np.asarray(current_row["theta"]),
+                        np.asarray(previous_row["theta"]),
+                        rtol=1e-5,
+                        atol=1e-7,
+                    )
+                    and abs(
+                        float(current_row["lml"])
+                        - float(previous_row["lml"])
+                    )
+                    <= 1e-5
+                    and float(current_row["map_delta_previous"]) <= 1e-6
+                )
+            if group_ended:
+                if row_index - group_start > 1:
+                    equivalent_groups.append(
+                        (upper_bounds[group_start], upper_bounds[row_index - 1])
+                    )
+                group_start = row_index
+
+        print(
+            "  UB       final LML       RMSE        R2    Constant   "
+            "ell_parallel   ell_perp   WhiteKernel   lower hit  upper hit   "
+            "map delta vs 100   map delta previous"
+        )
+        for row in rows:
+            length_scales = np.asarray(row["length_scales"])
+            print(
+                f"  {float(row['upper_bound']):6g}  {float(row['lml']):13.5f}  "
+                f"{float(row['rmse']):9.6f}  {float(row['r2']):8.5f}  "
+                f"{float(row['constant']):9.5f}   {length_scales[0]:12.6f}   "
+                f"{length_scales[1]:8.6f}   {float(row['white']):11.6f}   "
+                f"{str(row['lower_hit']):>9}  {str(row['upper_hit']):>9}   "
+                f"{float(row['map_delta_reference']):16.6g}   "
+                f"{float(row['map_delta_previous']):18.6g}"
+            )
+        print("  Physical length scales:")
+        print("  UB       ell_parallel [m]   ell_perp [m]")
+        for row in rows:
+            physical_length_scales = np.asarray(row["physical_length_scales"])
+            print(
+                f"  {float(row['upper_bound']):6g}   "
+                f"{physical_length_scales[0]:16.6f}   "
+                f"{physical_length_scales[1]:12.6f}"
+            )
+        if any(bool(row["upper_hit"]) for row in rows):
+            print("Direct length-scale upper-bound activity: at least one hit.")
+        else:
+            print("Direct length-scale upper-bound activity: no hits.")
+        for group_lower, group_upper in equivalent_groups:
+            print(
+                "Numerically equivalent consecutive solutions: "
+                f"UB={group_lower:g} through UB={group_upper:g}."
+            )
+        if smallest_reference_equivalent_upper_bound is None:
+            print(
+                "No nontrivial upper bound remains equivalent through the "
+                "largest tested value."
+            )
+        else:
+            print(
+                "Smallest upper bound equivalent through the largest tested value: "
+                f"{smallest_reference_equivalent_upper_bound:g}"
+            )
+
+        profile_results.append(
+            {
+                "label": label,
+                "rows": rows,
+                "fields": reconstructed_fields,
+                "smallest_reference_equivalent": (
+                    smallest_reference_equivalent_upper_bound
+                ),
+            }
+        )
+
+    print("\n=== Cross-profile reconstruction differences ===")
+    print("  UB       maximum absolute map difference")
+    default_fields = profile_results[0]["fields"]
+    short_scale_fields = profile_results[1]["fields"]
+    for upper_bound, default_field, short_scale_field in zip(
+        upper_bounds,
+        default_fields,
+        short_scale_fields,
+        strict=True,
+    ):
+        cross_profile_delta = float(
+            np.max(
+                np.abs(
+                    default_field[grid_data.valid_mask]
+                    - short_scale_field[grid_data.valid_mask]
+                )
+            )
+        )
+        print(f"  {upper_bound:6g}   {cross_profile_delta:31.6g}")
+
+    reference_equivalent_values = [
+        result["smallest_reference_equivalent"] for result in profile_results
+    ]
+    if all(value is not None for value in reference_equivalent_values):
+        common_reference_equivalent_upper_bound = max(
+            float(value) for value in reference_equivalent_values
+        )
+        print(
+            "\nSmallest upper bound equivalent through the largest tested value "
+            "for both profiles: "
+            f"{common_reference_equivalent_upper_bound:g}"
+        )
+    else:
+        print(
+            "\nNo common nontrivial invariance threshold was identified for both "
+            "profiles."
+        )
+
+    lml_matrix = np.vstack(
+        [[float(row["lml"]) for row in result["rows"]] for result in profile_results]
+    )
+    rmse_matrix = np.vstack(
+        [[float(row["rmse"]) for row in result["rows"]] for result in profile_results]
+    )
+    standardized_length_scales = np.stack(
+        [
+            np.vstack([np.asarray(row["length_scales"]) for row in result["rows"]])
+            for result in profile_results
+        ]
+    )
+    map_delta_matrix = np.vstack(
+        [
+            [float(row["map_delta_reference"]) for row in result["rows"]]
+            for result in profile_results
+        ]
+    )
+    figure_paths = plot_length_scale_upper_bound_study(
+        upper_bounds=upper_bounds,
+        profile_labels=[str(result["label"]) for result in profile_results],
+        lml_matrix=lml_matrix,
+        rmse_matrix=rmse_matrix,
+        standardized_length_scales=standardized_length_scales,
+        map_delta_matrix=map_delta_matrix,
+        output_path=output_path,
+        show=args.show,
+    )
+    print("\nSaved upper-bound sensitivity figures:")
+    for figure_path in figure_paths:
+        print(f"  - {figure_path}")
 
 
 # Compare deterministic kernel initializations while holding data and bounds fixed.

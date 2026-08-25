@@ -243,6 +243,21 @@ def parse_args() -> argparse.Namespace:
         help="Lower-bound values used by --length-scale-lower-bound-study.",
     )
     parser.add_argument(
+        "--length-scale-upper-bound-study",
+        action="store_true",
+        help=(
+            "Run a controlled upper-bound sensitivity study for Default and "
+            "Short-scale kernel initializations."
+        ),
+    )
+    parser.add_argument(
+        "--length-scale-upper-bound-study-values",
+        type=float,
+        nargs="+",
+        default=[1.0, 2.0, 5.0, 10.0, 100.0],
+        help="Upper-bound values used by --length-scale-upper-bound-study.",
+    )
+    parser.add_argument(
         "--optimizer-initialization-study",
         action="store_true",
         help=(
