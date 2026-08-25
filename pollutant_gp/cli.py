@@ -258,6 +258,21 @@ def parse_args() -> argparse.Namespace:
         help="Upper-bound values used by --length-scale-upper-bound-study.",
     )
     parser.add_argument(
+        "--length-scale-local-sensitivity-study",
+        action="store_true",
+        help=(
+            "Run a one-at-a-time local sensitivity study around the controlled "
+            "short-scale RBF solution, keeping both length scales fixed in each fit."
+        ),
+    )
+    parser.add_argument(
+        "--length-scale-local-sensitivity-factors",
+        type=float,
+        nargs="+",
+        default=[0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0],
+        help="Multiplicative factors used by --length-scale-local-sensitivity-study.",
+    )
+    parser.add_argument(
         "--optimizer-initialization-study",
         action="store_true",
         help=(

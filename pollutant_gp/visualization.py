@@ -597,6 +597,106 @@ def plot_length_scale_upper_bound_study(
     return model_fit_path, stability_path
 
 
+# Plot local fit sensitivity when one fixed RBF length scale is perturbed at a time.
+def plot_length_scale_local_sensitivity_study(
+    factors: Sequence[float],
+    parallel_lml: Sequence[float],
+    perpendicular_lml: Sequence[float],
+    parallel_rmse: Sequence[float],
+    perpendicular_rmse: Sequence[float],
+    parallel_optimizer_success: Sequence[bool],
+    perpendicular_optimizer_success: Sequence[bool],
+    output_path: Path,
+    show: bool,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x = np.asarray(factors, dtype=float)
+    parallel_optimizer_success = np.asarray(parallel_optimizer_success, dtype=bool)
+    perpendicular_optimizer_success = np.asarray(
+        perpendicular_optimizer_success,
+        dtype=bool,
+    )
+    figure, axes = plt.subplots(1, 2, figsize=(11.5, 4.6), constrained_layout=True)
+    panels = (
+        (
+            axes[0],
+            parallel_lml,
+            perpendicular_lml,
+            "Final log-marginal likelihood",
+        ),
+        (axes[1], parallel_rmse, perpendicular_rmse, "RMSE"),
+    )
+    for axis, parallel_values, perpendicular_values, ylabel in panels:
+        axis.plot(
+            x,
+            parallel_values,
+            color="#0072B2",
+            marker="o",
+            linewidth=2.0,
+            markersize=7,
+            label="Parallel length-scale perturbation",
+        )
+        axis.plot(
+            x,
+            perpendicular_values,
+            color="#D55E00",
+            marker="s",
+            linewidth=2.0,
+            markersize=7,
+            label="Perpendicular length-scale perturbation",
+        )
+        failed_parallel = ~parallel_optimizer_success
+        failed_perpendicular = ~perpendicular_optimizer_success
+        if np.any(failed_parallel):
+            axis.scatter(
+                x[failed_parallel],
+                np.asarray(parallel_values)[failed_parallel],
+                color="#111111",
+                marker="x",
+                s=100,
+                linewidths=2.0,
+                zorder=5,
+                label="Optimizer did not converge",
+            )
+        if np.any(failed_perpendicular):
+            axis.scatter(
+                x[failed_perpendicular],
+                np.asarray(perpendicular_values)[failed_perpendicular],
+                color="#111111",
+                marker="x",
+                s=100,
+                linewidths=2.0,
+                zorder=5,
+                label=(
+                    None
+                    if np.any(failed_parallel)
+                    else "Optimizer did not converge"
+                ),
+            )
+        axis.axvline(
+            1.0,
+            color="#333333",
+            linestyle=":",
+            linewidth=1.5,
+            label="Reference (alpha = 1)",
+        )
+        axis.set_xticks(x)
+        axis.set_xticklabels([f"{value:g}" for value in x])
+        axis.set_xlabel("Multiplicative factor alpha")
+        axis.set_ylabel(ylabel)
+        axis.set_title(f"{ylabel} vs length-scale factor")
+        axis.grid(True, linestyle="-", alpha=0.25)
+        axis.legend(fontsize=8)
+
+    figure.suptitle("Local one-at-a-time sensitivity of fixed RBF length-scales")
+    figure.savefig(output_path, dpi=220)
+    if show:
+        plt.show()
+    plt.close(figure)
+    return output_path
+
+
 # Plot final fit quality and optimized hyperparameters for deterministic initializations.
 def plot_optimizer_initialization_study(
     profile_labels: Sequence[str],

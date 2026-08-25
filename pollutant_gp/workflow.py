@@ -44,6 +44,7 @@ from pollutant_gp.visualization import (
     plot_kernel_comparison_multiseed,
     plot_kernel_comparison_multiseed_panels,
     plot_length_scale_lower_bound_study,
+    plot_length_scale_local_sensitivity_study,
     plot_length_scale_upper_bound_study,
     plot_optimizer_initialization_study,
     plot_optimizer_restart_study,
@@ -272,6 +273,26 @@ def make_length_scale_upper_bound_study_path(
     file_name = (
         f"{dataset_name}_{time_part}_samples_{n_samples}_"
         f"upper_bound_study_{timestamp}.png"
+    )
+    return output_dir / file_name
+
+
+def make_length_scale_local_sensitivity_study_path(
+    output_dir: Path,
+    figure_name: str | None,
+    nc_file: Path,
+    time_index: int | None,
+    n_samples: int,
+) -> Path:
+    if figure_name:
+        return output_dir / figure_name
+
+    dataset_name = nc_file.stem
+    time_part = f"time_{time_index}" if time_index is not None else "no_time"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = (
+        f"{dataset_name}_{time_part}_samples_{n_samples}_"
+        f"length_scale_local_sensitivity_{timestamp}.png"
     )
     return output_dir / file_name
 
@@ -518,6 +539,10 @@ def run_workflow(args: argparse.Namespace) -> None:
         print(f"Kernel mode: {args.kernel_mode}")
         print(f"Length-scale lower-bound study: {args.length_scale_lower_bound_study}")
         print(f"Length-scale upper-bound study: {args.length_scale_upper_bound_study}")
+        print(
+            "Length-scale local sensitivity study: "
+            f"{args.length_scale_local_sensitivity_study}"
+        )
         print(f"Optimizer initialization study: {args.optimizer_initialization_study}")
         print(f"Optimizer restart study: {args.optimizer_restart_study}")
         if args.optimizer_restart_study:
@@ -600,11 +625,12 @@ def run_workflow(args: argparse.Namespace) -> None:
             args.optimizer_restart_study,
             args.length_scale_lower_bound_study,
             args.length_scale_upper_bound_study,
+            args.length_scale_local_sensitivity_study,
         )
     )
     if controlled_optimizer_study_count > 1:
         raise ValueError(
-            "Choose only one controlled optimizer or lower-bound study at a time."
+            "Choose only one controlled optimizer or length-scale study at a time."
         )
 
     if args.optimizer_restart_study:
@@ -632,6 +658,22 @@ def run_workflow(args: argparse.Namespace) -> None:
             n_samples=args.n_samples,
         )
         run_length_scale_upper_bound_study(
+            args=args,
+            grid_data=grid_data,
+            output_path=study_path,
+            coordinate_transform=coordinate_transform,
+        )
+        return
+
+    if args.length_scale_local_sensitivity_study:
+        study_path = make_length_scale_local_sensitivity_study_path(
+            output_dir=args.output_dir,
+            figure_name=args.figure_name,
+            nc_file=args.nc_file,
+            time_index=time_index,
+            n_samples=args.n_samples,
+        )
+        run_length_scale_local_sensitivity_study(
             args=args,
             grid_data=grid_data,
             output_path=study_path,
@@ -1266,6 +1308,274 @@ def run_length_scale_upper_bound_study(
     print("\nSaved upper-bound sensitivity figures:")
     for figure_path in figure_paths:
         print(f"  - {figure_path}")
+
+
+# Perturb one fixed RBF length scale at a time around the best controlled solution.
+def run_length_scale_local_sensitivity_study(
+    args: argparse.Namespace,
+    grid_data,
+    output_path: Path,
+    coordinate_transform: RotationTransform | None,
+) -> None:
+    reference_length_scales = np.array([0.072329, 0.073012], dtype=float)
+    expected_lml = -865.51843
+    expected_constant = 1.28138
+    expected_white = 1e-6
+    lml_tolerance = 1e-3
+    constant_relative_tolerance = 1e-3
+    white_relative_tolerance = 1e-3
+    white_absolute_tolerance = 1e-9
+
+    if args.n_restarts != 0:
+        raise ValueError("The local sensitivity study requires --n-restarts 0.")
+    if args.kernel_mode != "anisotropic":
+        raise ValueError("The local sensitivity study requires --kernel-mode anisotropic.")
+    if coordinate_transform is None or args.physics_source != "current":
+        raise ValueError(
+            "The local sensitivity study requires current-informed coordinates."
+        )
+    if args.random_seed != 123 or args.n_samples != 800:
+        raise ValueError(
+            "The controlled local sensitivity study requires --random-seed 123 "
+            "and --n-samples 800."
+        )
+    if not np.isclose(args.length_scale_lower_bound, 0.05) or not np.isclose(
+        args.length_scale_upper_bound,
+        100.0,
+    ):
+        raise ValueError(
+            "The controlled local sensitivity study requires length-scale bounds [0.05, 100]."
+        )
+    if args.target_transform != "none":
+        raise ValueError("The controlled local sensitivity study requires --target-transform none.")
+    if not np.isclose(args.noise_level_initial, 1e-4):
+        raise ValueError(
+            "The controlled local sensitivity study requires --noise-level-initial 1e-4."
+        )
+
+    factors = sorted(set(float(value) for value in args.length_scale_local_sensitivity_factors))
+    if not factors or any(value <= 0.0 for value in factors):
+        raise ValueError("Local sensitivity factors must be positive.")
+    if not any(np.isclose(value, 1.0) for value in factors):
+        raise ValueError("Local sensitivity factors must include alpha=1.")
+    prescribed_scales = np.vstack(
+        [
+            reference_length_scales * np.array([factor, 1.0])
+            for factor in factors
+        ]
+        + [
+            reference_length_scales * np.array([1.0, factor])
+            for factor in factors
+        ]
+    )
+    if np.any(prescribed_scales < args.length_scale_lower_bound) or np.any(
+        prescribed_scales > args.length_scale_upper_bound
+    ):
+        raise ValueError(
+            "Every prescribed fixed length scale must remain inside the historical "
+            "range [0.05, 100]."
+        )
+
+    sample_coordinates, sample_values, _ = sample_sensor_points(
+        grid_data=grid_data,
+        n_samples=args.n_samples,
+        noise_std=args.noise_std,
+        random_seed=args.random_seed,
+    )
+    model_sample_coordinates = maybe_transform_coordinates(
+        sample_coordinates,
+        coordinate_transform,
+    )
+    optimizer_seed = resolve_optimizer_seed(args, args.random_seed)
+
+    def fit_fixed_length_scales(length_scales: np.ndarray) -> dict[str, object]:
+        model, coordinate_scaler, diagnostics = fit_gaussian_process(
+            sample_coordinates=model_sample_coordinates,
+            sample_values=sample_values,
+            kernel_mode="anisotropic",
+            length_scale_lower_bound=args.length_scale_lower_bound,
+            length_scale_upper_bound=args.length_scale_upper_bound,
+            noise_level_initial=1e-4,
+            noise_level_lower_bound=args.noise_level_lower_bound,
+            noise_level_upper_bound=args.noise_level_upper_bound,
+            target_transform=args.target_transform,
+            n_restarts=0,
+            optimizer_seed=optimizer_seed,
+            constant_value_initial=1.0,
+            length_scale_initial=length_scales,
+            fix_length_scales=True,
+        )
+        if not model.kernel_.k1.k2.hyperparameter_length_scale.fixed:
+            raise RuntimeError("RBF length scales were not fixed as requested.")
+        if model.kernel_.n_dims != 2:
+            raise RuntimeError(
+                "Expected exactly two optimized hyperparameters: ConstantKernel "
+                "and WhiteKernel."
+            )
+        if not np.array_equal(
+            np.asarray(model.kernel_.k1.k2.length_scale, dtype=float),
+            np.asarray(length_scales, dtype=float),
+        ):
+            raise RuntimeError("The fitted RBF length scales differ from their fixed values.")
+
+        reconstruction = reconstruct_field(
+            grid_data=grid_data,
+            model=model,
+            coordinate_scaler=coordinate_scaler,
+            batch_size=args.prediction_batch_size,
+            target_transform=args.target_transform,
+            clip_negative=args.clip_negative,
+            coordinate_transform=coordinate_transform,
+        )
+        parameters = {parameter.name: parameter for parameter in diagnostics.hyperparameters}
+        constant_parameter = parameters["k1__k1__constant_value"]
+        white_parameter = parameters["k2__noise_level"]
+        selected_run = diagnostics.optimizer_runs[diagnostics.selected_run_index]
+        return {
+            "length_scales": diagnostics.standardized_length_scales.copy(),
+            "physical_length_scales": diagnostics.physical_length_scales.copy(),
+            "constant": float(model.kernel_.k1.k1.constant_value),
+            "white": float(model.kernel_.k2.noise_level),
+            "constant_lower_hit": constant_parameter.at_lower_bound,
+            "constant_upper_hit": constant_parameter.at_upper_bound,
+            "white_lower_hit": white_parameter.at_lower_bound,
+            "white_upper_hit": white_parameter.at_upper_bound,
+            "lml": diagnostics.final_lml,
+            "rmse": reconstruction.rmse,
+            "r2": reconstruction.r2,
+            "field": reconstruction.mean_field.copy(),
+            "optimizer_success": selected_run.success,
+        }
+
+    print("\n=== Local RBF length-scale sensitivity study ===")
+    print(f"Factors: {format_diagnostic_vector(np.asarray(factors))}")
+    print(
+        "Reference standardized length scales: "
+        f"{format_diagnostic_vector(reference_length_scales)}"
+    )
+    print("RBF length scales: fixed; optimized parameters: ConstantKernel and WhiteKernel.")
+    print("Optimizer restarts: 0; sampling seed: 123; sensor count: 800.")
+
+    print("\n=== Alpha=1 reference reproduction check ===")
+    reference_result = fit_fixed_length_scales(reference_length_scales)
+    reference_lml = float(reference_result["lml"])
+    reference_constant = float(reference_result["constant"])
+    reference_white = float(reference_result["white"])
+    lml_matches = np.isclose(reference_lml, expected_lml, rtol=0.0, atol=lml_tolerance)
+    constant_matches = np.isclose(
+        reference_constant,
+        expected_constant,
+        rtol=constant_relative_tolerance,
+        atol=0.0,
+    )
+    white_matches = np.isclose(
+        reference_white,
+        expected_white,
+        rtol=white_relative_tolerance,
+        atol=white_absolute_tolerance,
+    )
+    print(
+        f"LML: expected {expected_lml:.8f}, obtained {reference_lml:.8f}, "
+        f"abs diff={abs(reference_lml - expected_lml):.3g}, pass={lml_matches}"
+    )
+    print(
+        f"ConstantKernel: expected {expected_constant:.8g}, "
+        f"obtained {reference_constant:.8g}, pass={constant_matches}"
+    )
+    print(
+        f"WhiteKernel: expected {expected_white:.8g}, "
+        f"obtained {reference_white:.8g}, pass={white_matches}"
+    )
+    print("Optimizable kernel dimensions: 2 (ConstantKernel and WhiteKernel).")
+    if not (lml_matches and constant_matches and white_matches):
+        raise RuntimeError(
+            "Alpha=1 does not reproduce the controlled reference within tolerance; "
+            "the local sensitivity sweep was stopped."
+        )
+    print("Reference reproduction: PASSED. Continuing with local perturbations.")
+
+    reference_field = np.asarray(reference_result["field"])
+    results_by_direction: dict[str, list[dict[str, object]]] = {
+        "Parallel": [],
+        "Perpendicular": [],
+    }
+    for direction, dimension in (("Parallel", 0), ("Perpendicular", 1)):
+        print(f"\n--- {direction} perturbation ---")
+        for factor in factors:
+            length_scales = reference_length_scales.copy()
+            length_scales[dimension] *= factor
+            result = (
+                reference_result.copy()
+                if np.isclose(factor, 1.0)
+                else fit_fixed_length_scales(length_scales)
+            )
+            field = np.asarray(result["field"])
+            result["factor"] = factor
+            result["map_delta"] = float(
+                np.max(
+                    np.abs(
+                        field[grid_data.valid_mask]
+                        - reference_field[grid_data.valid_mask]
+                    )
+                )
+            )
+            results_by_direction[direction].append(result)
+            print(
+                f"  alpha={factor:4.2f}  "
+                f"ell={format_diagnostic_vector(np.asarray(result['length_scales']))}  "
+                f"LML={float(result['lml']):.8f}  RMSE={float(result['rmse']):.8f}  "
+                f"R2={float(result['r2']):.8f}"
+            )
+
+    print("\n=== Local sensitivity numerical summary ===")
+    for direction, rows in results_by_direction.items():
+        print(f"\n  {direction} perturbation:")
+        print(
+            "  alpha   ell_parallel  ell_perp   ell_parallel[m]  ell_perp[m]  "
+            "Constant    White       LML          RMSE       R2       map delta  "
+            "C bounds  W bounds  optimizer"
+        )
+        for row in rows:
+            length_scales = np.asarray(row["length_scales"])
+            physical_scales = np.asarray(row["physical_length_scales"])
+            constant_bounds = (
+                "lower"
+                if row["constant_lower_hit"]
+                else "upper" if row["constant_upper_hit"] else "none"
+            )
+            white_bounds = (
+                "lower"
+                if row["white_lower_hit"]
+                else "upper" if row["white_upper_hit"] else "none"
+            )
+            print(
+                f"  {float(row['factor']):5.2f}   {length_scales[0]:12.6f}  "
+                f"{length_scales[1]:8.6f}   {physical_scales[0]:15.6f}  "
+                f"{physical_scales[1]:11.6f}  {float(row['constant']):9.6f}  "
+                f"{float(row['white']):10.6g}  {float(row['lml']):12.6f}  "
+                f"{float(row['rmse']):9.6f}  {float(row['r2']):8.5f}  "
+                f"{float(row['map_delta']):10.6g}  {constant_bounds:>8}  "
+                f"{white_bounds:>8}  {str(row['optimizer_success']):>9}"
+            )
+
+    parallel_rows = results_by_direction["Parallel"]
+    perpendicular_rows = results_by_direction["Perpendicular"]
+    plot_path = plot_length_scale_local_sensitivity_study(
+        factors=factors,
+        parallel_lml=[float(row["lml"]) for row in parallel_rows],
+        perpendicular_lml=[float(row["lml"]) for row in perpendicular_rows],
+        parallel_rmse=[float(row["rmse"]) for row in parallel_rows],
+        perpendicular_rmse=[float(row["rmse"]) for row in perpendicular_rows],
+        parallel_optimizer_success=[
+            bool(row["optimizer_success"]) for row in parallel_rows
+        ],
+        perpendicular_optimizer_success=[
+            bool(row["optimizer_success"]) for row in perpendicular_rows
+        ],
+        output_path=output_path,
+        show=args.show,
+    )
+    print(f"\nSaved local length-scale sensitivity figure: {plot_path}")
 
 
 # Compare deterministic kernel initializations while holding data and bounds fixed.

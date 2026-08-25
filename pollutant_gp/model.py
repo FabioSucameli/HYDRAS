@@ -189,6 +189,7 @@ def build_kernel(
     noise_level_upper_bound: float,
     constant_value_initial: float = 1.0,
     length_scale_initial: float | np.ndarray | None = None,
+    fix_length_scales: bool = False,
 ):
     if constant_value_initial <= 0.0:
         raise ValueError("The ConstantKernel initial value must be positive.")
@@ -227,7 +228,11 @@ def build_kernel(
         ConstantKernel(constant_value_initial, (1e-3, 1e3))
         * RBF(
             length_scale=length_scale,
-            length_scale_bounds=(length_scale_lower_bound, length_scale_upper_bound),
+            length_scale_bounds=(
+                "fixed"
+                if fix_length_scales
+                else (length_scale_lower_bound, length_scale_upper_bound)
+            ),
         )
         + WhiteKernel(
             noise_level=noise_level_initial,
@@ -252,6 +257,7 @@ def fit_gaussian_process(
     optimizer_seed: int,
     constant_value_initial: float = 1.0,
     length_scale_initial: float | np.ndarray | None = None,
+    fix_length_scales: bool = False,
 ) -> tuple[GaussianProcessRegressor, StandardScaler, GPOptimizationDiagnostics]:
     
     # Standardize spatial coordinates.
@@ -272,6 +278,7 @@ def fit_gaussian_process(
         noise_level_upper_bound=noise_level_upper_bound,
         constant_value_initial=constant_value_initial,
         length_scale_initial=length_scale_initial,
+        fix_length_scales=fix_length_scales,
     )
     initial_theta = kernel.theta.copy()
     original_bounds = np.exp(kernel.bounds)
