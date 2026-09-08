@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 from pollutant_gp.data import (
@@ -102,6 +103,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Standard deviation of additive Gaussian sensor noise.",
+    )
+    parser.add_argument(
+        "--peak-diagnostics",
+        action="store_true",
+        help="Print peak metrics after a single reconstruction and save a zoom and two directional profiles.",
+    )
+    parser.add_argument(
+        "--peak-radius",
+        type=float,
+        default=150.0,
+        help="Radius of the peak-centred diagnostic disk in grid coordinate units (metres for CL02).",
     )
     parser.add_argument(
         "--concentration-display-threshold",
@@ -403,6 +415,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
+    if args.peak_diagnostics:
+        if not math.isfinite(args.peak_radius) or args.peak_radius <= 0:
+            parser.error("--peak-radius must be finite and positive.")
+        if any((args.inspect_netcdf, args.print_dataset, args.plot_concentration_map,
+                args.kernel_comparison_study, args.sample_size_study,
+                args.sample_size_study_multiseed, args.optimizer_initialization_study,
+                args.optimizer_restart_study, args.length_scale_lower_bound_study,
+                args.length_scale_upper_bound_study, args.length_scale_local_sensitivity_study)):
+            parser.error("--peak-diagnostics applies to a single reconstruction, not an inspection or study mode.")
     if args.current_informed:
         args.physically_informed = True
         args.physics_source = "current"

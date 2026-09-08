@@ -29,6 +29,11 @@ from pollutant_gp.model import (
 
 # Field reconstruction using the trained GP
 from pollutant_gp.reconstruction import reconstruct_field
+from pollutant_gp.peak import extract_peak_profiles, measure_peak
+from pollutant_gp.peak_visualization import (
+    plot_peak_diagnostics,
+    print_peak_diagnostics,
+)
 
 # Synthetic sensor sampling
 from pollutant_gp.sampling import sample_sensor_points
@@ -714,7 +719,7 @@ def run_workflow(args: argparse.Namespace) -> None:
         return
 
     # Sample synthetic sensor measurements
-    sample_coordinates, sample_values, _ = sample_sensor_points(
+    sample_coordinates, sample_values, sampled_flat_indices = sample_sensor_points(
         grid_data=grid_data,
         n_samples=args.n_samples,
         noise_std=args.noise_std,
@@ -798,6 +803,26 @@ def run_workflow(args: argparse.Namespace) -> None:
     print("Saved separate reconstruction panels:")
     for panel_path in panel_paths:
         print(f"  - {panel_path}")
+
+    if args.peak_diagnostics:
+        peak = measure_peak(grid_data, reconstruction, sampled_flat_indices,
+                            sample_values, args.peak_radius)
+        print_peak_diagnostics(peak)
+        try:
+            profiles = extract_peak_profiles(grid_data, reconstruction, peak, coordinate_transform)
+        except ValueError as exc:
+            profiles = None
+            print(f"Peak profiles not generated: {exc}")
+        peak_base = figure_path.with_name(f"{figure_path.stem}_seed_{args.random_seed}_peak")
+        title = (f"{args.nc_file.stem} | time index {time_index}\n"
+                 f"N = {args.n_samples}, sampling seed = {args.random_seed}")
+        plot_paths = plot_peak_diagnostics(
+            grid_data, reconstruction, sampled_flat_indices, peak, profiles,
+            peak_base, title, args.show,
+        )
+        print("Saved peak diagnostics (no additional fit):")
+        for path in plot_paths:
+            print(f"  - {path}")
 
     # Optional sample size study
     if args.sample_size_study:
