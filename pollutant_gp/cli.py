@@ -116,6 +116,28 @@ def parse_args() -> argparse.Namespace:
         help="Radius of the peak-centred diagnostic disk in grid coordinate units (metres for CL02).",
     )
     parser.add_argument(
+        "--peak-sampling-study",
+        action="store_true",
+        help="Compare uniform, peak-observed and locally enriched oracle samples at fixed sensor count.",
+    )
+    parser.add_argument(
+        "--peak-local-replacements",
+        type=int,
+        default=160,
+        help="Number of outside sensors replaced by distinct unsampled cells inside the peak disk.",
+    )
+    parser.add_argument(
+        "--peak-vmax",
+        type=float,
+        default=None,
+        help="Optional common colour maximum for peak zooms across runs; automatic when omitted.",
+    )
+    parser.add_argument(
+        "--peak-coordinate-unit",
+        default=None,
+        help="Coordinate unit label for peak diagnostics (e.g. m), overriding metadata; no conversion.",
+    )
+    parser.add_argument(
         "--concentration-display-threshold",
         type=float,
         default=0.0,
@@ -415,7 +437,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
-    if args.peak_diagnostics:
+    if args.peak_diagnostics or args.peak_sampling_study:
+        if args.peak_vmax is not None and (not math.isfinite(args.peak_vmax) or args.peak_vmax <= 0):
+            parser.error("--peak-vmax must be finite and positive.")
         if not math.isfinite(args.peak_radius) or args.peak_radius <= 0:
             parser.error("--peak-radius must be finite and positive.")
         if any((args.inspect_netcdf, args.print_dataset, args.plot_concentration_map,
@@ -423,7 +447,14 @@ def parse_args() -> argparse.Namespace:
                 args.sample_size_study_multiseed, args.optimizer_initialization_study,
                 args.optimizer_restart_study, args.length_scale_lower_bound_study,
                 args.length_scale_upper_bound_study, args.length_scale_local_sensitivity_study)):
-            parser.error("--peak-diagnostics applies to a single reconstruction, not an inspection or study mode.")
+            parser.error("Peak diagnostics and sampling control cannot be combined with other study or inspection modes.")
+    if args.peak_sampling_study:
+        if args.peak_diagnostics:
+            parser.error("--peak-sampling-study already includes peak diagnostics; omit --peak-diagnostics.")
+        if args.peak_local_replacements <= 0:
+            parser.error("--peak-local-replacements must be positive.")
+        if args.noise_std != 0 or args.target_transform != "none" or args.n_restarts != 0:
+            parser.error("This sampling control requires zero sensor noise, target transform none and zero restarts.")
     if args.current_informed:
         args.physically_informed = True
         args.physics_source = "current"

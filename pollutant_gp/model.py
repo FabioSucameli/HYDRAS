@@ -258,14 +258,29 @@ def fit_gaussian_process(
     constant_value_initial: float = 1.0,
     length_scale_initial: float | np.ndarray | None = None,
     fix_length_scales: bool = False,
+    coordinate_scaler: StandardScaler | None = None,
+    target_normalization: tuple[float, float] | None = None,
 ) -> tuple[GaussianProcessRegressor, StandardScaler, GPOptimizationDiagnostics]:
+    """Fit normally, or reuse baseline preprocessing for a controlled sampling comparison.
+
+    With target_normalization, pass the same tuple to reconstruct_field to restore target units.
+    """
     
     # Standardize spatial coordinates.
-    coordinate_scaler = StandardScaler()
-    scaled_coordinates = coordinate_scaler.fit_transform(sample_coordinates)
+    if coordinate_scaler is None:
+        coordinate_scaler = StandardScaler()
+        scaled_coordinates = coordinate_scaler.fit_transform(sample_coordinates)
+    else:
+        scaled_coordinates = coordinate_scaler.transform(sample_coordinates)
 
     # Optionally transform target concentration values
     transformed_values = transform_targets(sample_values, target_transform)
+    training_values = transformed_values
+    if target_normalization is not None:
+        target_mean, target_scale = target_normalization
+        if not np.all(np.isfinite(target_normalization)) or target_scale <= 0:
+            raise ValueError("Target normalization needs a finite mean and a positive finite scale.")
+        training_values = (transformed_values - target_mean) / target_scale
 
     # Build GP covariance kernel.
     kernel = build_kernel(
@@ -285,17 +300,17 @@ def fit_gaussian_process(
     parameter_names = _expanded_hyperparameter_names(kernel)
     optimizer = _RecordingLBFGSBOptimizer()
 
-    # Create the GP regression model.
+    # Explicit baseline normalization replaces normalize_y only for controlled comparisons.
     model = GaussianProcessRegressor(
         kernel=kernel,
         alpha=1e-10,
         optimizer=optimizer,
-        normalize_y=True,
+        normalize_y=target_normalization is None,
         n_restarts_optimizer=n_restarts,
         random_state=optimizer_seed,
     )
     # Fit GP hyperparameters and training data.
-    model.fit(scaled_coordinates, transformed_values)
+    model.fit(scaled_coordinates, training_values)
 
     final_theta = model.kernel_.theta.copy()
     initial_values = np.exp(initial_theta)
@@ -339,16 +354,16 @@ def fit_gaussian_process(
     selected_run_index = int(
         np.argmax([run.final_lml for run in optimizer.runs])
     )
-    target_scale = float(np.std(transformed_values))
-    if target_scale == 0.0:
-        target_scale = 1.0
+    if target_normalization is None:
+        target_mean = float(np.mean(transformed_values))
+        target_scale = float(np.std(transformed_values)) or 1.0
 
     diagnostics = GPOptimizationDiagnostics(
         optimizer_seed=optimizer_seed,
         n_restarts=n_restarts,
         coordinate_mean=coordinate_scaler.mean_.copy(),
         coordinate_scale=coordinate_scaler.scale_.copy(),
-        target_mean=float(np.mean(transformed_values)),
+        target_mean=target_mean,
         target_scale=target_scale,
         initial_lml=initial_lml,
         final_lml=float(model.log_marginal_likelihood_value_),

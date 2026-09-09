@@ -16,7 +16,8 @@ from pollutant_gp.types import GridData, ReconstructionResult
 # The function returns both:
 # - the predicted concentration field;
 # - the predictive uncertainty field;
-# - reconstruction metrics against the ground truth.
+# - reconstruction metrics against the ground truth;
+# - positivity diagnostics before optional clipping.
 def reconstruct_field(
     grid_data: GridData,
     model: GaussianProcessRegressor,
@@ -25,6 +26,7 @@ def reconstruct_field(
     target_transform: str,
     clip_negative: bool,
     coordinate_transform: RotationTransform | None = None,
+    target_normalization: tuple[float, float] | None = None,
 ) -> ReconstructionResult:
     
     # Extract coordinates of valid cells and reshape them into a 2D array of (x, y) pairs for prediction.
@@ -47,12 +49,29 @@ def reconstruct_field(
         prediction_coordinates=prediction_coordinates,
         batch_size=batch_size,
     )
+    # Undo an explicitly frozen target normalization before transformation or clipping.
+    if target_normalization is not None:
+        target_mean, target_scale = target_normalization
+        predicted_mean = target_mean + target_scale * predicted_mean
+        predicted_std = target_scale * predicted_std
+
     # If targets were transformed before training
     predicted_mean, predicted_std = inverse_predictions(
         predicted_mean,
         predicted_std,
         target_transform,
     )
+
+    # Store diagnostics before enforcing the non-negativity constraint.
+    predicted_mean_before_clipping = predicted_mean.copy()
+    negative_mask = predicted_mean_before_clipping < 0.0
+    negative_count = int(np.count_nonzero(negative_mask))
+    negative_fraction = negative_count / predicted_mean_before_clipping.size
+    min_prediction_before_clipping = float(np.min(predicted_mean_before_clipping))
+    if negative_count > 0:
+        mean_negative_prediction = float(np.mean(predicted_mean_before_clipping[negative_mask]))
+    else:
+        mean_negative_prediction = float("nan")
 
     # Concentration cannot be negative.
     if clip_negative:
@@ -83,4 +102,8 @@ def reconstruct_field(
         rmse=rmse,
         mae=float(mae),
         r2=float(r2),
+        min_prediction_before_clipping=min_prediction_before_clipping,
+        negative_prediction_count=negative_count,
+        negative_prediction_fraction=float(negative_fraction),
+        mean_negative_prediction=mean_negative_prediction,
     )

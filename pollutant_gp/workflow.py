@@ -30,6 +30,7 @@ from pollutant_gp.model import (
 # Field reconstruction using the trained GP
 from pollutant_gp.reconstruction import reconstruct_field
 from pollutant_gp.peak import extract_peak_profiles, measure_peak
+from pollutant_gp.peak_sampling import run_peak_sampling_study
 from pollutant_gp.peak_visualization import (
     plot_peak_diagnostics,
     print_peak_diagnostics,
@@ -585,6 +586,14 @@ def run_workflow(args: argparse.Namespace) -> None:
     finally:
         ds.close()
 
+    # Use only matching coordinate metadata; an explicit label does not convert distances.
+    coordinate_unit = args.peak_coordinate_unit
+    if coordinate_unit is None:
+        x_unit = ds[x_coordinate].attrs.get("units") if x_coordinate in ds else None
+        y_unit = ds[y_coordinate].attrs.get("units") if y_coordinate in ds else None
+        coordinate_unit = x_unit if isinstance(x_unit, str) and x_unit == y_unit else None
+    coordinate_unit = coordinate_unit or "coordinate units"
+
     # Ground-truth field summary statistics
     valid_values = grid_data.field[grid_data.valid_mask]
     cells_above_threshold = int(np.sum(valid_values > 1.0))
@@ -623,6 +632,13 @@ def run_workflow(args: argparse.Namespace) -> None:
         return
 
     coordinate_transform = build_coordinate_transform(args, grid_data)
+
+    if args.peak_sampling_study:
+        figure_path = make_output_figure_path(
+            args.output_dir, args.figure_name, args.nc_file, time_index, args.n_samples,
+        )
+        run_peak_sampling_study(args, grid_data, coordinate_transform, figure_path, coordinate_unit)
+        return
 
     controlled_optimizer_study_count = sum(
         (
@@ -807,7 +823,7 @@ def run_workflow(args: argparse.Namespace) -> None:
     if args.peak_diagnostics:
         peak = measure_peak(grid_data, reconstruction, sampled_flat_indices,
                             sample_values, args.peak_radius)
-        print_peak_diagnostics(peak)
+        print_peak_diagnostics(peak, coordinate_unit=coordinate_unit)
         try:
             profiles = extract_peak_profiles(grid_data, reconstruction, peak, coordinate_transform)
         except ValueError as exc:
@@ -819,6 +835,7 @@ def run_workflow(args: argparse.Namespace) -> None:
         plot_paths = plot_peak_diagnostics(
             grid_data, reconstruction, sampled_flat_indices, peak, profiles,
             peak_base, title, args.show,
+            colour_max=args.peak_vmax, coordinate_unit=coordinate_unit,
         )
         print("Saved peak diagnostics (no additional fit):")
         for path in plot_paths:

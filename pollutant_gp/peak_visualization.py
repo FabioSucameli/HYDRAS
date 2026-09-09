@@ -13,13 +13,13 @@ from pollutant_gp.types import GridData, ReconstructionResult
 
 
 # Print quantities that distinguish a missing observation from a smoothed observed peak.
-def print_peak_diagnostics(diagnostics: PeakDiagnostics) -> None:
+def print_peak_diagnostics(diagnostics: PeakDiagnostics, coordinate_unit: str = "coordinate units") -> None:
     def number(value):
         return "n/a" if value is None else f"{value:.8g}"
 
     print("\n=== Peak diagnostics (post-fit; original concentration units) ===")
     print("Region: disk around the ground-truth maximum, not an assumed source location.")
-    print(f"Radius: {diagnostics.radius:g} coordinate units (metres for the CL02 grid)")
+    print(f"Radius: {diagnostics.radius:g} {coordinate_unit}")
     print(f"Ground-truth peak coordinates: {diagnostics.true_peak_xy}")
     print(f"Predicted peak coordinates: {diagnostics.predicted_peak_xy}")
     print(f"Ground-truth maximum: {diagnostics.true_max:.8g}")
@@ -32,8 +32,8 @@ def print_peak_diagnostics(diagnostics: PeakDiagnostics) -> None:
     print(f"Signed peak underestimation: {diagnostics.peak_underestimation:.8g}")
     print("Relative underestimation (%; negative means overshoot): "
           f"{number(None if fraction is None else 100 * fraction)}")
-    print(f"Peak location error: {diagnostics.peak_location_error:.8g} coordinate units")
-    print(f"Nearest sensor distance: {diagnostics.nearest_sensor_distance:.8g} coordinate units")
+    print(f"Peak location error: {diagnostics.peak_location_error:.8g} {coordinate_unit}")
+    print(f"Nearest sensor distance: {diagnostics.nearest_sensor_distance:.8g} {coordinate_unit}")
     print(f"Local cells / sensors: {diagnostics.local_cell_count} / {diagnostics.local_sensor_count}")
     print(f"Global RMSE (all valid cells): {diagnostics.global_rmse:.8g}")
     print(f"Local RMSE (all valid cells in disk): {diagnostics.local_rmse:.8g}")
@@ -53,7 +53,11 @@ def plot_peak_diagnostics(
     output_base: Path,
     title: str,
     show: bool = False,
+    colour_max: float | None = None,
+    coordinate_unit: str = "coordinate units",
 ) -> list[Path]:
+    if colour_max is not None and (not np.isfinite(colour_max) or colour_max <= 0):
+        raise ValueError("The colour maximum must be finite and positive.")
     output_base.parent.mkdir(parents=True, exist_ok=True)
     center = np.asarray(diagnostics.true_peak_xy)
     radius = diagnostics.radius
@@ -64,7 +68,8 @@ def plot_peak_diagnostics(
     prediction = np.where(grid_data.valid_mask, reconstruction.mean_field, np.nan)
     truth = np.where(grid_data.valid_mask, grid_data.field, np.nan)
     vmin = min(0.0, float(np.nanmin(truth)), float(np.nanmin(prediction)))
-    vmax = max(diagnostics.true_max, diagnostics.predicted_max, vmin + 1e-12)
+    data_max = max(diagnostics.true_max, diagnostics.predicted_max, vmin + 1e-12)
+    vmax = data_max if colour_max is None else colour_max
     figure, axes = plt.subplots(1, 2, figsize=(12, 6.6), constrained_layout=True)
     for axis, values, label in zip(axes, (truth, prediction), ("Ground truth", "GP reconstruction")):
         mesh = axis.pcolormesh(x, y, values, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
@@ -78,13 +83,14 @@ def plot_peak_diagnostics(
             axis.scatter(*predicted_offset, marker="x", s=65, color="#D55E00",
                          linewidths=2, label="Predicted maximum", zorder=5)
         axis.set(xlim=(-radius, radius), ylim=(-radius, radius), title=label,
-                 xlabel="x offset from true maximum (coordinate units)",
-                 ylabel="y offset from true maximum (coordinate units)")
+                 xlabel=f"x offset from true maximum ({coordinate_unit})",
+                 ylabel=f"y offset from true maximum ({coordinate_unit})")
         axis.set_aspect("equal")
     handles, labels = axes[0].get_legend_handles_labels()
     figure.legend(handles, labels, loc="outside lower center", ncols=len(labels))
-    figure.colorbar(mesh, ax=axes, label="Concentration", shrink=0.85)
-    figure.suptitle(title + f"\nPeak-centred zoom; diagnostic disk radius = {radius:g}", fontsize=13)
+    figure.colorbar(mesh, ax=axes, label="Concentration", shrink=0.85,
+                    extend="max" if data_max > vmax else "neither")
+    figure.suptitle(title + f"\nPeak-centred zoom; diagnostic disk radius = {radius:g} {coordinate_unit}", fontsize=13)
     zoom_path = output_base.with_name(output_base.name + "_zoom.png")
     figure.savefig(zoom_path, dpi=200)
     if show:
@@ -102,10 +108,10 @@ def plot_peak_diagnostics(
                       drawstyle="steps-mid", label="GP reconstruction")
             axis.axvline(0, color="0.6", linestyle=":", linewidth=1)
             axis.set(title=f"{profile.label} | angle from +x = {profile.angle_degrees:.2f} deg",
-                     ylabel="Concentration", ylim=(vmin, vmax * 1.05))
+                     ylabel="Concentration", ylim=(vmin, data_max * 1.05))
             axis.grid(alpha=0.2)
             axis.legend(loc="upper right")
-        axes[-1].set_xlabel("Signed distance from true maximum (coordinate units)")
+        axes[-1].set_xlabel(f"Signed distance from true maximum ({coordinate_unit})")
         figure.suptitle(title + "\nNearest-cell profiles of the existing maps; gaps are masked/outside cells",
                        fontsize=12)
         profile_path = output_base.with_name(output_base.name + "_profiles.png")
@@ -116,3 +122,81 @@ def plot_peak_diagnostics(
         paths.append(profile_path)
     return paths
 
+
+# Compare oracle sampling controls with shared colour limits and overlaid directional profiles.
+def plot_peak_sampling_comparison(
+    grid, runs, output_base: Path, title: str, coordinate_unit: str,
+    colour_max: float | None = None, show: bool = False,
+) -> list[Path]:
+    output_base.parent.mkdir(parents=True, exist_ok=True)
+    center = np.asarray(runs[0].peak.true_peak_xy)
+    radius = runs[0].peak.radius
+    x, y = grid.x_grid - center[0], grid.y_grid - center[1]
+    fields = [grid.field] + [run.reconstruction.mean_field for run in runs]
+    vmin = min(0.0, *(float(np.min(field[grid.valid_mask])) for field in fields))
+    data_max = max(float(np.max(field[grid.valid_mask])) for field in fields)
+    vmax = max(data_max, vmin + 1e-12) if colour_max is None else colour_max
+    figure, axes = plt.subplots(2, 2, figsize=(12, 11), constrained_layout=True)
+    for i, (axis, field) in enumerate(zip(axes.flat, fields)):
+        mesh = axis.pcolormesh(x, y, np.where(grid.valid_mask, field, np.nan),
+                               shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+        axis.add_patch(Circle((0, 0), radius, fill=False, edgecolor="0.6", linestyle="--"))
+        axis.scatter(0, 0, marker="*", s=120, c="#E69F00", edgecolors="black",
+                     label="True maximum", zorder=6)
+        label = "Ground truth"
+        if i:
+            run = runs[i - 1]
+            xy = np.column_stack((x.ravel()[run.indices], y.ravel()[run.indices]))
+            inside = np.all(np.abs(xy) <= radius, axis=1)
+            added = ~np.isin(run.indices, runs[0].indices)
+            for selection, colour, sensor_label in (
+                (inside & ~added, "white", "Retained sensors"),
+                (inside & added, "#00BFC4", "Added sensors"),
+            ):
+                axis.scatter(*xy[selection].T, s=16, facecolors="none", edgecolors=colour,
+                             linewidths=0.8, label=sensor_label, zorder=4)
+            delta = np.asarray(run.peak.predicted_peak_xy) - center
+            if np.all(np.abs(delta) <= radius):
+                axis.scatter(*delta, marker="x", s=55, c="#D55E00", linewidths=2,
+                             label="Predicted maximum", zorder=5)
+            suffix = "; same samples as Uniform" if run.reused else ""
+            label = f"{run.name}\nLocal sensors: {run.peak.local_sensor_count}{suffix}"
+        axis.set(title=label, xlim=(-radius, radius), ylim=(-radius, radius),
+                 xlabel=f"x offset from true maximum ({coordinate_unit})",
+                 ylabel=f"y offset from true maximum ({coordinate_unit})")
+        axis.set_aspect("equal")
+    handles, labels = axes.flat[-1].get_legend_handles_labels()
+    figure.legend(handles, labels, loc="outside lower center", ncols=len(labels))
+    figure.colorbar(mesh, ax=list(axes.flat), label="Concentration", shrink=0.85,
+                    extend="max" if data_max > vmax else "neither")
+    figure.suptitle(title + f"\nDiagnostic disk radius = {radius:g} {coordinate_unit}", fontsize=12)
+    zoom_path = output_base.with_name(output_base.name + "_zoom.png")
+    figure.savefig(zoom_path, dpi=200)
+    if show:
+        plt.show()
+    plt.close(figure)
+
+    figure, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True, sharey=True,
+                               constrained_layout=True)
+    for i, axis in enumerate(axes):
+        reference = runs[0].profiles[i]
+        axis.plot(reference.distances, reference.truth, color="black", drawstyle="steps-mid",
+                  linewidth=2, label="Ground truth")
+        for run, colour, style in zip(runs, ("#0072B2", "#D55E00", "#009E73"), ("-", "--", "-.")):
+            profile = run.profiles[i]
+            label = run.name + (" = Uniform" if run.reused else "")
+            axis.plot(profile.distances, profile.prediction, color=colour, linestyle=style,
+                      drawstyle="steps-mid", linewidth=1.5, label=label)
+        axis.axvline(0, color="0.6", linestyle=":", linewidth=1)
+        axis.set(title=f"{reference.label} | angle from +x = {reference.angle_degrees:.2f} deg",
+                 ylabel="Concentration")
+        axis.grid(alpha=0.2)
+    axes[0].legend(fontsize=9)
+    axes[-1].set_xlabel(f"Signed distance from true maximum ({coordinate_unit})")
+    figure.suptitle(title + "\nNearest-cell profiles of the reconstructed maps", fontsize=12)
+    profile_path = output_base.with_name(output_base.name + "_profiles.png")
+    figure.savefig(profile_path, dpi=200)
+    if show:
+        plt.show()
+    plt.close(figure)
+    return [zoom_path, profile_path]
