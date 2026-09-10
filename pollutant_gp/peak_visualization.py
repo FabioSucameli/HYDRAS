@@ -123,6 +123,93 @@ def plot_peak_diagnostics(
     return paths
 
 
+# Compare the two kernel structures on each fixed sensor set, with shared map colours.
+def plot_peak_kernel_comparison(grid, runs, output_base, title, coordinate_unit,
+                                colour_max=None, show=False):
+    output_base.parent.mkdir(parents=True, exist_ok=True)
+    center = np.asarray(runs[0].peak.true_peak_xy)
+    radius = runs[0].peak.radius
+    x, y = grid.x_grid - center[0], grid.y_grid - center[1]
+    fields = [grid.field] + [run.reconstruction.mean_field for run in runs]
+    data_max = max(float(np.max(field[grid.valid_mask])) for field in fields)
+    vmin = min(0., *(float(np.min(field[grid.valid_mask])) for field in fields))
+    vmax = max(data_max, vmin + 1e-12) if colour_max is None else colour_max
+    figure, axes = plt.subplots(2, 3, figsize=(15, 10), constrained_layout=True)
+    for row, label in enumerate(("Uniform", "Locally enriched (oracle)")):
+        pair = runs[row * 2:row * 2 + 2]
+        for column, axis in enumerate(axes[row]):
+            field = grid.field if column == 0 else pair[column - 1].reconstruction.mean_field
+            mesh = axis.pcolormesh(x, y, np.where(grid.valid_mask, field, np.nan),
+                                  shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+            indices = pair[0].indices
+            inside = (np.abs(x.ravel()[indices]) <= radius) & (np.abs(y.ravel()[indices]) <= radius)
+            axis.scatter(x.ravel()[indices][inside], y.ravel()[indices][inside], s=10,
+                         facecolors="none", edgecolors="white", linewidths=.6)
+            axis.scatter(0, 0, marker="*", s=100, color="#E69F00", edgecolors="black", zorder=5)
+            axis.add_patch(Circle((0, 0), radius, fill=False, color="0.6", linestyle="--"))
+            if column:
+                delta = np.asarray(pair[column - 1].peak.predicted_peak_xy) - center
+                if np.all(np.abs(delta) <= radius):
+                    axis.scatter(*delta, marker="x", color="#D55E00", s=45, zorder=5)
+            axis.set(title=f"{label}\n{('Ground truth', 'Single RBF', 'Two RBFs')[column]}",
+                     xlim=(-radius, radius), ylim=(-radius, radius),
+                     xlabel=f"x offset ({coordinate_unit})", ylabel=f"y offset ({coordinate_unit})")
+            axis.set_aspect("equal")
+    figure.colorbar(mesh, ax=list(axes.flat), label="Concentration", shrink=.8,
+                    extend="max" if data_max > vmax else "neither")
+    figure.suptitle(title + "\nWhite circles: sensors; star: true maximum; cross: global predicted maximum",
+                    fontsize=12)
+    zoom = output_base.with_name(output_base.name + "_zoom.png")
+    figure.savefig(zoom, dpi=200)
+    if show:
+        plt.show()
+    plt.close(figure)
+
+    figure, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+    for row, sampling in enumerate(("Uniform", "Locally enriched (oracle)")):
+        for direction, axis in enumerate(axes[row]):
+            pair = runs[row * 2:row * 2 + 2]
+            profile = pair[0].profiles[direction]
+            axis.plot(profile.distances, profile.truth, color="black",
+                      drawstyle="steps-mid", label="Ground truth", linewidth=2)
+            for run, colour, style, label in zip(pair, ("#0072B2", "#D55E00"),
+                                                ("--", "-"), ("Single RBF", "Two RBFs")):
+                p = run.profiles[direction]
+                axis.plot(p.distances, p.prediction, color=colour, linestyle=style,
+                          drawstyle="steps-mid", label=label)
+            axis.set(title=f"{sampling} | {profile.label}", ylabel="Concentration",
+                     xlabel=f"Signed distance from true maximum ({coordinate_unit})")
+            axis.axvline(0, color=".6", linestyle=":")
+            axis.grid(alpha=.2)
+            axis.legend()
+    figure.suptitle(title + "\nNearest-cell profiles of the reconstructed maps", fontsize=12)
+    profiles = output_base.with_name(output_base.name + "_profiles.png")
+    figure.savefig(profiles, dpi=200)
+    if show:
+        plt.show()
+    plt.close(figure)
+
+    figure, axes = plt.subplots(1, 2, figsize=(10, 4.5), constrained_layout=True)
+    for axis, attribute, label in zip(axes, ("common_rmse", "common_local_rmse"),
+                                      ("Global common unseen cells", "Local common unseen cells")):
+        for offset, colour, structure in ((-.18, "#0072B2", 0), (.18, "#D55E00", 1)):
+            values = [getattr(runs[row * 2 + structure], attribute) for row in range(2)]
+            bars = axis.bar(np.arange(2) + offset, values, .36, color=colour,
+                            label=("Single RBF", "Two RBFs")[structure])
+            axis.bar_label(bars, fmt="%.4f", padding=3, fontsize=9)
+        axis.set(xticks=[0, 1], xticklabels=["Uniform", "Enriched (oracle)"],
+                 ylabel="RMSE", title=label)
+        axis.margins(y=.25)
+        axis.legend()
+    figure.suptitle(title, fontsize=11)
+    metrics = output_base.with_name(output_base.name + "_rmse.png")
+    figure.savefig(metrics, dpi=200)
+    if show:
+        plt.show()
+    plt.close(figure)
+    return [zoom, profiles, metrics]
+
+
 # Compare oracle sampling controls with shared colour limits and overlaid directional profiles.
 def plot_peak_sampling_comparison(
     grid, runs, output_base: Path, title: str, coordinate_unit: str,

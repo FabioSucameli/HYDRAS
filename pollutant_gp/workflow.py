@@ -31,6 +31,7 @@ from pollutant_gp.model import (
 from pollutant_gp.reconstruction import reconstruct_field
 from pollutant_gp.peak import extract_peak_profiles, measure_peak
 from pollutant_gp.peak_sampling import run_peak_sampling_study
+from pollutant_gp.peak_kernel import run_peak_kernel_study
 from pollutant_gp.peak_visualization import (
     plot_peak_diagnostics,
     print_peak_diagnostics,
@@ -633,11 +634,12 @@ def run_workflow(args: argparse.Namespace) -> None:
 
     coordinate_transform = build_coordinate_transform(args, grid_data)
 
-    if args.peak_sampling_study:
+    if args.peak_sampling_study or args.peak_kernel_study:
         figure_path = make_output_figure_path(
             args.output_dir, args.figure_name, args.nc_file, time_index, args.n_samples,
         )
-        run_peak_sampling_study(args, grid_data, coordinate_transform, figure_path, coordinate_unit)
+        study = run_peak_kernel_study if args.peak_kernel_study else run_peak_sampling_study
+        study(args, grid_data, coordinate_transform, figure_path, coordinate_unit)
         return
 
     controlled_optimizer_study_count = sum(

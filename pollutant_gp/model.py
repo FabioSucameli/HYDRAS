@@ -190,6 +190,7 @@ def build_kernel(
     constant_value_initial: float = 1.0,
     length_scale_initial: float | np.ndarray | None = None,
     fix_length_scales: bool = False,
+    second_length_scale_initial: float | None = None,
 ):
     if constant_value_initial <= 0.0:
         raise ValueError("The ConstantKernel initial value must be positive.")
@@ -224,7 +225,7 @@ def build_kernel(
     if np.any(np.asarray(length_scale) <= 0.0):
         raise ValueError("All initial length scales must be positive.")
 
-    return (
+    kernel = (
         ConstantKernel(constant_value_initial, (1e-3, 1e3))
         * RBF(
             length_scale=length_scale,
@@ -239,6 +240,17 @@ def build_kernel(
             noise_level_bounds=(noise_level_lower_bound, noise_level_upper_bound),
         )
     )
+    if second_length_scale_initial is not None:
+        if not np.isfinite(second_length_scale_initial) or not (
+            length_scale_lower_bound <= second_length_scale_initial <= length_scale_upper_bound
+        ):
+            raise ValueError("The second initial length scale must be finite and within bounds.")
+        second_scale = (np.full(n_features, second_length_scale_initial)
+                        if kernel_mode == "anisotropic" else second_length_scale_initial)
+        kernel = (kernel.k1 + ConstantKernel(constant_value_initial, (1e-3, 1e3))
+                  * RBF(second_scale, "fixed" if fix_length_scales else
+                        (length_scale_lower_bound, length_scale_upper_bound)) + kernel.k2)
+    return kernel
 
 # Fit a Gaussian Process on standardized spatial coordinates.
 # The GP learns a mapping from (x, y) coordinates to concentration values using only the sparse synthetic measurements.
@@ -260,6 +272,7 @@ def fit_gaussian_process(
     fix_length_scales: bool = False,
     coordinate_scaler: StandardScaler | None = None,
     target_normalization: tuple[float, float] | None = None,
+    second_length_scale_initial: float | None = None,
 ) -> tuple[GaussianProcessRegressor, StandardScaler, GPOptimizationDiagnostics]:
     """Fit normally, or reuse baseline preprocessing for a controlled sampling comparison.
 
@@ -294,6 +307,7 @@ def fit_gaussian_process(
         constant_value_initial=constant_value_initial,
         length_scale_initial=length_scale_initial,
         fix_length_scales=fix_length_scales,
+        second_length_scale_initial=second_length_scale_initial,
     )
     initial_theta = kernel.theta.copy()
     original_bounds = np.exp(kernel.bounds)
@@ -342,10 +356,14 @@ def fit_gaussian_process(
         )
     )
 
-    standardized_length_scales = np.asarray(
-        model.kernel_.k1.k2.length_scale,
-        dtype=float,
-    ).reshape(-1)
+    if second_length_scale_initial is None:
+        standardized_length_scales = np.asarray(model.kernel_.k1.k2.length_scale, dtype=float).reshape(-1)
+    else:
+        # Rows retain component order; no constraint forces a global/local interpretation.
+        standardized_length_scales = np.asarray([
+            np.atleast_1d(model.kernel_.k1.k1.k2.length_scale),
+            np.atleast_1d(model.kernel_.k1.k2.k2.length_scale),
+        ], dtype=float)
     if standardized_length_scales.size == 1:
         physical_length_scales = standardized_length_scales[0] * coordinate_scaler.scale_
     else:

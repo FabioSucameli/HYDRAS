@@ -436,8 +436,21 @@ def parse_args() -> argparse.Namespace:
             "Example: --sample-size-study-seeds 7 42 123"
         ),
     )
+    parser.add_argument(
+        "--peak-kernel-study", action="store_true",
+        help="Compare single/two-scale current-informed kernels on Uniform and enriched oracle sensors.",
+    )
     args = parser.parse_args()
-    if args.peak_diagnostics or args.peak_sampling_study:
+    if args.peak_kernel_study:
+        if args.peak_sampling_study or args.peak_diagnostics:
+            parser.error("--peak-kernel-study is a standalone peak comparison.")
+        if not (args.current_informed or (args.physically_informed and args.physics_source == "current")):
+            parser.error("--peak-kernel-study requires current-informed coordinates.")
+        if args.kernel_mode != "anisotropic":
+            parser.error("--peak-kernel-study requires anisotropic kernels.")
+        if not (0 < args.length_scale_lower_bound <= 0.075 and 1 <= args.length_scale_upper_bound < math.inf):
+            parser.error("The controlled initializations require finite bounds containing [0.075, 1].")
+    if args.peak_diagnostics or args.peak_sampling_study or args.peak_kernel_study:
         if args.peak_vmax is not None and (not math.isfinite(args.peak_vmax) or args.peak_vmax <= 0):
             parser.error("--peak-vmax must be finite and positive.")
         if not math.isfinite(args.peak_radius) or args.peak_radius <= 0:
@@ -448,7 +461,7 @@ def parse_args() -> argparse.Namespace:
                 args.optimizer_restart_study, args.length_scale_lower_bound_study,
                 args.length_scale_upper_bound_study, args.length_scale_local_sensitivity_study)):
             parser.error("Peak diagnostics and sampling control cannot be combined with other study or inspection modes.")
-    if args.peak_sampling_study:
+    if args.peak_sampling_study or args.peak_kernel_study:
         if args.peak_diagnostics:
             parser.error("--peak-sampling-study already includes peak diagnostics; omit --peak-diagnostics.")
         if args.peak_local_replacements <= 0:
