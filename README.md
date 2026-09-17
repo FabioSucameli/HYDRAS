@@ -198,10 +198,6 @@ two physically informed curves separate clearly from them.
 Controlled experiments on `CL02_V1_SRC131` (time index 729, 800 sensors) show how local sampling
 and a flexible current-informed GP can improve both peak recovery and field reconstruction.
 
-### Diagnosing the Peak
-
-![Peak diagnostics at seed 123](outputs/cl02_current_n800_seed123_peak_zoom.png)
-
 `--peak-diagnostics` complements global metrics with peak height, location and error within a
 150 m disk. These diagnostics reveal local details that a low global RMSE can hide.
 
