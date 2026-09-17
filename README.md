@@ -123,6 +123,14 @@ Implemented:
   wind-informed and current-informed — on identical shared samples;
 - positivity diagnostics before clipping, and an optional `log1p` target transform;
 - length-scale bound diagnostics, reporting how often an optimised length scale reaches its bound;
+- **peak diagnostics** at a fixed sensor budget: prediction at the true maximum, localisation error
+  and local RMSE inside a peak-centred disk, with a zoom and two directional profiles;
+- **oracle sampling controls** — peak-observed and locally enriched — that redistribute sensors
+  without changing their number, and are evaluated on cells observed by no configuration;
+- **single versus two-scale kernel comparison**, with prescribed initialisations selected by
+  marginal likelihood on the sensors alone;
+- controlled optimiser diagnostics: initialisation study, nested restart study, and lower-bound,
+  upper-bound and local sensitivity studies for the length scales;
 - NetCDF inspection utilities.
 
 ---
@@ -185,6 +193,57 @@ two physically informed curves separate clearly from them.
 
 ---
 
+## Recovering the Peak
+
+Controlled experiments on `CL02_V1_SRC131` (time index 729, 800 sensors) show how local sampling
+and a flexible current-informed GP can improve both peak recovery and field reconstruction.
+
+### Diagnosing the Peak
+
+![Peak diagnostics at seed 123](outputs/cl02_current_n800_seed123_peak_zoom.png)
+
+`--peak-diagnostics` complements global metrics with peak height, location and error within a
+150 m disk. These diagnostics reveal local details that a low global RMSE can hide.
+
+### Improving Local Coverage
+
+![Oracle sampling control at seed 123](outputs/cl02_seed123_sampling_zoom.png)
+
+`--peak-sampling-study` compares uniform, peak-observed and locally enriched layouts at a
+**fixed budget of 800 sensors**. Moving 160 sensors into the disk reduces local RMSE on common
+unobserved cells from **2.94 to 0.50** for seed 123 and **0.47 to 0.39** for seed 7.
+This improves the neighbourhood reconstruction, while motivating a closer look at peak height.
+
+### Recovering the Peak with Finer Scales
+
+`--peak-kernel-study` compares single and two-scale RBF kernels, selecting the best converged fit
+from two prescribed initialisations by sensor marginal likelihood. With enriched sampling,
+lowering the length-scale bound from 0.05 to 0.02 substantially improves peak recovery:
+
+| Seed 123, enriched | Lower bound | Prediction at the true peak | Local unseen RMSE |
+|---|---:|---:|---:|
+| Single RBF | 0.05 | 2.975 | 0.448 |
+| Single RBF | 0.02 | **7.280** | 0.269 |
+| Two RBFs | 0.05 | 3.161 | 0.444 |
+| Two RBFs | 0.02 | **7.381** | 0.278 |
+
+The two-scale model recovers **96.5% of the true peak** (7.647) for seed 123 and **81.2%** for
+seed 7. At the same bound of 0.02, it also reduces global RMSE on common unobserved cells by
+approximately **29% and 34%**, respectively, compared with the single RBF.
+
+![Single and two-scale kernels at lower bound 0.02](outputs/cl02_peak_kernel_seed123_lb002_zoom.png)
+
+Ground truth, single RBF and two RBFs at lower bound 0.02. Rows show uniform and enriched sampling,
+with a shared colour scale.
+
+These results support combining local coverage with finer admissible scales and a two-scale
+covariance. They concern two seeds and one snapshot: enrichment uses the known true peak
+(*oracle* information), and a smaller bound does not improve every sampling configuration.
+They demonstrate improved reconstruction, not autonomous source localisation.
+
+---
+
+
 ## Repository Structure
 
 ```text
@@ -199,9 +258,15 @@ pollutant_gp/
   spatial.py                Coordinate rotation used by the physically informed models
   wind.py                   Wind time series parsing and transport direction
   current.py                Current U/V fields and mean transport direction
+  peak.py                   Peak-centred metrics and the diagnostic disk
+  peak_sampling.py          Oracle sampling controls at a fixed sensor budget
+  peak_kernel.py            Single versus two-scale kernel comparison
+  peak_visualization.py     Peak zooms and directional profiles
   types.py                  Shared dataclasses
+  style.py                  Shared palette and figure styling
   visualization.py          Plot generation
   workflow.py               Pipeline orchestration and experimental studies
+outputs/                    Selected figures
 
 requirements.txt
 README.md
@@ -307,6 +372,36 @@ python main.py --time-index 729 --target-transform log1p
 python main.py --time-index 729 --allow-negative-predictions
 ```
 
+
+### Peak diagnostics and kernel study
+
+Metrics and figures centred on the true maximum, after a single reconstruction:
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 \
+  --n-samples 800 --current-informed --random-seed 123 --n-restarts 0 \
+  --peak-diagnostics --peak-radius 150 --peak-vmax 11 --peak-coordinate-unit m
+```
+
+Uniform, peak-observed and locally enriched sensor layouts:
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 \
+  --n-samples 800 --current-informed --random-seed 123 --n-restarts 0 \
+  --peak-sampling-study --peak-radius 150 --peak-local-replacements 160 \
+  --peak-vmax 11 --peak-coordinate-unit m
+```
+
+Single against two-scale kernel:
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 \
+  --n-samples 800 --current-informed --random-seed 123 --n-restarts 0 \
+  --peak-kernel-study --length-scale-lower-bound 0.02 \
+  --peak-radius 150 --peak-local-replacements 160 \
+  --peak-vmax 11 --peak-coordinate-unit m
+```
+
 ---
 
 ## Command-Line Arguments
@@ -338,6 +433,19 @@ python main.py --time-index 729 --allow-negative-predictions
 | `--kernel-comparison-study` | off | Multi-seed comparison of the four covariance structures |
 | `--sample-size-study-counts` | `10 25 50 100 200 400 800` | Sample counts used by the studies |
 | `--sample-size-study-seeds` | `7 42 123 256 512` | Seeds used by the multi-seed studies |
+| `--peak-diagnostics` | off | Peak metrics, zoom and directional profiles after one reconstruction |
+| `--peak-sampling-study` | off | Uniform, peak-observed and locally enriched oracle layouts at a fixed budget |
+| `--peak-kernel-study` | off | Single against two-scale current-informed kernel on the same sensors |
+| `--peak-radius` | `150.0` | Radius of the peak-centred diagnostic disk, in grid units |
+| `--peak-local-replacements` | `160` | Outside sensors moved into the disk by the enriched control |
+| `--peak-vmax` | auto | Common colour maximum for peak zooms, so runs stay comparable |
+| `--peak-coordinate-unit` | auto | Unit label for the peak figures; no conversion is applied |
+| `--optimizer-seed` | sampling seed | Seed used only for optimiser restarts |
+| `--optimizer-initialization-study` | off | Four deterministic kernel initialisations on one shared sample |
+| `--optimizer-restart-study` | off | Nested restart study, evaluating every internal optimiser run |
+| `--length-scale-lower-bound-study` | off | Controlled sensitivity study over length-scale lower bounds |
+| `--length-scale-upper-bound-study` | off | The same for upper bounds, on two initialisations |
+| `--length-scale-local-sensitivity-study` | off | One-at-a-time perturbations around the short-scale solution |
 | `--output-dir` | `outputs` | Directory where figures are saved |
 | `--figure-name` | auto | Custom name for the main figure |
 | `--show` | off | Show figures interactively as well as saving them |
