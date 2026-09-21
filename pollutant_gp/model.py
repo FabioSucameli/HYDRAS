@@ -150,18 +150,45 @@ def _is_at_bound(value: float, bound: float) -> bool:
 # Supported transformations:
 # - "none": use raw concentration values.
 # - "log1p": use log(1 + concentration), useful for highly skewed fields with many near-zero values and localized high peaks.
+# - "sqrt": fit square roots and predict moments of the squared latent field.
 def transform_targets(values: np.ndarray, transform: str) -> np.ndarray:
     if transform == "none":
         return values
-    if transform == "log1p":
-        # log1p is only meaningful for non-negative values.
-        # If noisy samples become negative, clip them to zero before transforming.
+    if transform in ("log1p", "sqrt"):
+        # Preserve the existing explicit correction of negative noisy observations.
         if np.any(values < 0.0):
-            warnings.warn("Negative sample values were clipped to zero before log1p transform.")
-        return np.log1p(np.maximum(values, 0.0))
+            warnings.warn(f"Negative sample values were clipped to zero before {transform} transform.")
+        function = np.log1p if transform == "log1p" else np.sqrt
+        return function(np.maximum(values, 0.0))
     raise ValueError(f"Unknown target transform: {transform}")
 
-# Map GP predictions back to the original concentration scale.
+# Compute exact marginal moments after transforming a Gaussian latent variable.
+def concentration_moments(mean, variance, transform):
+    mean, variance = np.asarray(mean), np.asarray(variance)
+    if np.any(variance < 0):
+        raise ValueError("Latent variance must be nonnegative.")
+    with np.errstate(over="raise", invalid="raise"):
+        if transform == "none":
+            return mean.copy(), variance.copy()
+        if transform == "log1p":
+            return np.expm1(mean + variance / 2), np.expm1(variance) * np.exp(2 * mean + variance)
+        if transform == "sqrt":
+            return mean**2 + variance, 2 * variance**2 + 4 * mean**2 * variance
+    raise ValueError(f"Unknown transform: {transform}")
+
+
+# Remove the test-observation WhiteKernel variance in restored target units.
+def latent_variance(observation_std, white_level, target_scale):
+    observation_variance = np.asarray(observation_std)**2
+    white_variance = white_level * target_scale**2
+    variance = observation_variance - white_variance
+    tolerance = 1e-10 * max(1., float(np.nanmax(observation_variance)), white_variance)
+    if np.nanmin(variance) < -tolerance:
+        raise ValueError("Negative latent variance beyond roundoff; check normalization.")
+    return np.maximum(variance, 0.)
+
+
+# Return moment-corrected concentration mean/std from restored latent target moments.
 def inverse_predictions(
     mean: np.ndarray,
     std: np.ndarray,
@@ -169,11 +196,8 @@ def inverse_predictions(
 ) -> tuple[np.ndarray, np.ndarray]:
     if transform == "none":
         return mean, std
-    if transform == "log1p":
-        raw_mean = np.expm1(mean)
-        raw_std = np.exp(mean) * std
-        return raw_mean, raw_std
-    raise ValueError(f"Unknown target transform: {transform}")
+    raw_mean, raw_variance = concentration_moments(mean, np.asarray(std)**2, transform)
+    return raw_mean, np.sqrt(raw_variance)
 
 
 # Build the GP kernel used for spatial reconstruction.

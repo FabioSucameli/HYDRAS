@@ -349,9 +349,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-transform",
-        choices=("none", "log1p"),
+        choices=("none", "log1p", "sqrt"),
         default="none",
-        help="Optional target transform before fitting the GP.",
+        help="Target transform; log1p/sqrt use moment-corrected latent-field predictions.",
     )
     parser.add_argument(
         "--n-restarts",
@@ -440,8 +440,14 @@ def parse_args() -> argparse.Namespace:
         "--peak-kernel-study", action="store_true",
         help="Compare single/two-scale current-informed kernels on Uniform and enriched oracle sensors.",
     )
+    parser.add_argument(
+        "--positivity-study", action="store_true",
+        help="Compare clipping, log1p and square-root targets with two-scale current-informed GPs.",
+    )
     args = parser.parse_args()
-    if args.peak_kernel_study:
+    if args.positivity_study and (args.peak_kernel_study or args.peak_sampling_study or args.peak_diagnostics):
+        parser.error("--positivity-study is a standalone controlled comparison.")
+    if args.peak_kernel_study or args.positivity_study:
         if args.peak_sampling_study or args.peak_diagnostics:
             parser.error("--peak-kernel-study is a standalone peak comparison.")
         if not (args.current_informed or (args.physically_informed and args.physics_source == "current")):
@@ -450,7 +456,7 @@ def parse_args() -> argparse.Namespace:
             parser.error("--peak-kernel-study requires anisotropic kernels.")
         if not (0 < args.length_scale_lower_bound <= 0.075 and 1 <= args.length_scale_upper_bound < math.inf):
             parser.error("The controlled initializations require finite bounds containing [0.075, 1].")
-    if args.peak_diagnostics or args.peak_sampling_study or args.peak_kernel_study:
+    if args.peak_diagnostics or args.peak_sampling_study or args.peak_kernel_study or args.positivity_study:
         if args.peak_vmax is not None and (not math.isfinite(args.peak_vmax) or args.peak_vmax <= 0):
             parser.error("--peak-vmax must be finite and positive.")
         if not math.isfinite(args.peak_radius) or args.peak_radius <= 0:
@@ -461,7 +467,7 @@ def parse_args() -> argparse.Namespace:
                 args.optimizer_restart_study, args.length_scale_lower_bound_study,
                 args.length_scale_upper_bound_study, args.length_scale_local_sensitivity_study)):
             parser.error("Peak diagnostics and sampling control cannot be combined with other study or inspection modes.")
-    if args.peak_sampling_study or args.peak_kernel_study:
+    if args.peak_sampling_study or args.peak_kernel_study or args.positivity_study:
         if args.peak_diagnostics:
             parser.error("--peak-sampling-study already includes peak diagnostics; omit --peak-diagnostics.")
         if args.peak_local_replacements <= 0:

@@ -32,6 +32,7 @@ from pollutant_gp.reconstruction import reconstruct_field
 from pollutant_gp.peak import extract_peak_profiles, measure_peak
 from pollutant_gp.peak_sampling import run_peak_sampling_study
 from pollutant_gp.peak_kernel import run_peak_kernel_study
+from pollutant_gp.positivity import run_positivity_study
 from pollutant_gp.peak_visualization import (
     plot_peak_diagnostics,
     print_peak_diagnostics,
@@ -570,8 +571,15 @@ def run_workflow(args: argparse.Namespace) -> None:
                 print(f"Current averaging window: {args.current_average_hours:g} h")
                 print(f"Current u variable: {args.current_u_variable}")
                 print(f"Current v variable: {args.current_v_variable}")
-        print(f"Target transform: {args.target_transform}")
-        print(f"Clip negative predictions: {args.clip_negative}")
+        if args.positivity_study:
+            print("Target transforms: none, log1p, sqrt (controlled positivity study)")
+            print("Clipping: paired raw/clipped controls; no clipping for square-root mean")
+        else:
+            print(f"Target transform: {args.target_transform}")
+            if args.target_transform != "none":
+                print("Prediction: moment-corrected latent concentration mean/std (WhiteKernel test noise excluded)")
+                print("Uncertainty is before mean clipping; transformed distributions are not Gaussian")
+            print(f"Clip negative predictions: {args.clip_negative}")
 
         # Prepare 2D grid data
         grid_data = prepare_grid_data(
@@ -634,11 +642,12 @@ def run_workflow(args: argparse.Namespace) -> None:
 
     coordinate_transform = build_coordinate_transform(args, grid_data)
 
-    if args.peak_sampling_study or args.peak_kernel_study:
+    if args.peak_sampling_study or args.peak_kernel_study or args.positivity_study:
         figure_path = make_output_figure_path(
             args.output_dir, args.figure_name, args.nc_file, time_index, args.n_samples,
         )
-        study = run_peak_kernel_study if args.peak_kernel_study else run_peak_sampling_study
+        study = (run_positivity_study if args.positivity_study else
+                 run_peak_kernel_study if args.peak_kernel_study else run_peak_sampling_study)
         study(args, grid_data, coordinate_transform, figure_path, coordinate_unit)
         return
 

@@ -7,7 +7,7 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 
-from pollutant_gp.model import inverse_predictions, predict_in_batches
+from pollutant_gp.model import inverse_predictions, latent_variance, predict_in_batches
 from pollutant_gp.spatial import RotationTransform, maybe_transform_coordinates
 from pollutant_gp.types import GridData, ReconstructionResult
 
@@ -55,7 +55,15 @@ def reconstruct_field(
         predicted_mean = target_mean + target_scale * predicted_mean
         predicted_std = target_scale * predicted_std
 
-    # If targets were transformed before training
+    # Nonlinear moments describe the latent field, excluding new-observation noise.
+    if target_transform != "none":
+        target_scale = (target_normalization[1] if target_normalization is not None
+                        else float(np.asarray(model._y_train_std).item()))
+        predicted_std = np.sqrt(latent_variance(
+            predicted_std, model.kernel_.k2.noise_level, target_scale,
+        ))
+
+    # Transform before optional clipping; std is not the spread of a clipped distribution.
     predicted_mean, predicted_std = inverse_predictions(
         predicted_mean,
         predicted_std,
