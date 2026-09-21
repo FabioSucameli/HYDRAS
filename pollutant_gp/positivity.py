@@ -95,6 +95,7 @@ def plot_positivity_profiles(profiles, path, title, unit, show):
 
 # Reuse matched sensor sets and two prescribed starts, selecting within each target space only.
 def run_positivity_study(args, grid, coordinate_transform, output_path, coordinate_unit):
+    verbose = getattr(args, "verbose_optimizer_diagnostics", False)
     if coordinate_transform is None:
         raise ValueError("Current-informed coordinates are required.")
     if np.any(grid.field[grid.valid_mask] < 0):
@@ -113,9 +114,12 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
     csv_path = base.with_name(base.name + "_metrics.csv")
     optimizer_seed = args.random_seed if args.optimizer_seed is None else args.optimizer_seed
     print("\n=== Positivity study: two-scale current-informed GP ===", flush=True)
-    print(f"Settings: {vars(args)}")
-    print(f"Rotation: {coordinate_transform}")
-    print(f"Coordinate mean/scale: {scaler.mean_} / {scaler.scale_}")
+    print(f"N={args.n_samples}; sampling seed={args.random_seed}; optimizer seed={optimizer_seed}; "
+          f"length-scale bounds=[{args.length_scale_lower_bound:g}, {args.length_scale_upper_bound:g}]")
+    if verbose:
+        print(f"Settings: {vars(args)}")
+        print(f"Rotation: {coordinate_transform}")
+        print(f"Coordinate mean/scale: {scaler.mean_} / {scaler.scale_}")
     print(f"Common unobserved cells: global={common.sum()}, local={(common & local).sum()}")
     print("Noiseless oracle control. Two starts per target/layout; selection uses sensor LML only.")
     print("Do NOT compare LML between transforms or layouts. Predictions use latent field variance.")
@@ -133,7 +137,9 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
                 reference = transform_concentrations(grid.field.ravel()[uniform], transform)
                 normalization = (float(reference.mean()), float(reference.std()) or 1.)
                 transformed = transform_concentrations(values, transform)
-                print(f"Target={transform}; frozen Uniform mean/std={normalization}", flush=True)
+                print(f"Target={transform}: fitting two initializations...", flush=True)
+                if verbose:
+                    print(f"Frozen Uniform mean/std={normalization}")
                 candidates = []
                 started = perf_counter()
                 for name, first, second, amplitude in INITIALIZATIONS["Double"]:
@@ -145,11 +151,20 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
                         length_scale_initial=first, second_length_scale_initial=second,
                         coordinate_scaler=scaler, target_normalization=normalization,
                     )
-                    print_kernel_fit(name, diagnostic, coordinate_unit)
+                    if verbose:
+                        print_kernel_fit(name, diagnostic, coordinate_unit)
+                    else:
+                        for run in diagnostic.optimizer_runs:
+                            if not run.success:
+                                print(f"WARNING: {name}: status={run.status}; {run.message}", flush=True)
                     candidates.append((name, model, fitted_scaler, diagnostic))
                 fit_seconds = perf_counter() - started
                 name, model, _, diagnostic = select_converged_fit(candidates)
-                print(f"Selected {transform}: {name}; LML={diagnostic.final_lml:.12g}; {model.kernel_}", flush=True)
+                print(f"Selected {transform}: {name}; LML={diagnostic.final_lml:.8g}; "
+                      f"length-scale bound hit: lower={diagnostic.length_scale_lower_bound_hit}, "
+                      f"upper={diagnostic.length_scale_upper_bound_hit}", flush=True)
+                if verbose:
+                    print(f"Learned kernel: {model.kernel_}")
                 started = perf_counter()
                 latent = reconstruct_field(grid, model, scaler, args.prediction_batch_size, "none", False,
                                            coordinate_transform, target_normalization=normalization)
@@ -192,10 +207,13 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
                     writer.writerow(row)
                     stream.flush()
                     rows.append(row)
-                    print(f"{method}: unseen global RMSE={row['unseen_global_rmse']:.8g}; "
-                          f"local={row['unseen_local_rmse']:.8g}; peak={peak.prediction_at_true_peak:.8g}; "
-                          f"negative={row['raw_negative_percent']:.3f}%; min={row['raw_min']:.8g}", flush=True)
-                    if method in ("Direct + clip", "Square-root mean"):
+                    if verbose or method in ("Direct + clip", "Log1p mean + clip", "Square-root mean"):
+                        print(f"{method}: unseen global RMSE={row['unseen_global_rmse']:.6g}; "
+                              f"local={row['unseen_local_rmse']:.6g}; "
+                              f"prediction at true peak={peak.prediction_at_true_peak:.6g}", flush=True)
+                    if verbose:
+                        print(f"  Raw negative={row['raw_negative_percent']:.3f}%; min={row['raw_min']:.8g}")
+                    if verbose and method in ("Direct + clip", "Square-root mean"):
                         print(f"  Common unobserved bands [c=0, 0<c<=1, c>1]: "
                               f"counts={[metrics[f'{band}_count'] for band in ('zero', 'low', 'high')]}; "
                               f"RMSE={[metrics[f'{band}_rmse'] for band in ('zero', 'low', 'high')]}")
@@ -211,5 +229,7 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
                             f"{args.nc_file.stem} | time {args.time_index} | N={args.n_samples} | seed {args.random_seed}",
                             coordinate_unit, args.show)
     print(f"Saved metrics: {csv_path}\nSaved profiles: {figure_path}\nSaved mean fields and masks: {fields_path}")
-    print("Times are repeated across estimators from the same fit; clipping controls require no refit.")
+    print("All metrics, including raw/clipped controls and concentration bands, are saved in CSV.")
+    if verbose:
+        print("Times are repeated across estimators from the same fit; clipping controls require no refit.")
     return rows, profiles, common

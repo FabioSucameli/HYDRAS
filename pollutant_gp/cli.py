@@ -444,6 +444,10 @@ def parse_args() -> argparse.Namespace:
         "--positivity-study", action="store_true",
         help="Compare clipping, log1p and square-root targets with two-scale current-informed GPs.",
     )
+    parser.add_argument(
+        "--verbose-optimizer-diagnostics", action="store_true",
+        help="Show full candidate optimizer diagnostics and detailed output in the positivity study.",
+    )
     args = parser.parse_args()
     if args.positivity_study and (args.peak_kernel_study or args.peak_sampling_study or args.peak_diagnostics):
         parser.error("--positivity-study is a standalone controlled comparison.")
