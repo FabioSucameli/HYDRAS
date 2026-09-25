@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-samples",
         type=int,
-        default=200,
+        default=None,
         help="Number of synthetic sensor measurements sampled from valid sea cells.",
     )
     parser.add_argument(
@@ -140,7 +140,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--concentration-display-threshold",
         type=float,
-        default=0.0,
+        default=None,
         help=(
             "Values at or below this threshold are hidden in standalone concentration maps, "
             "leaving the marine-domain background visible."
@@ -252,7 +252,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--length-scale-lower-bound",
         type=float,
-        default=0.05,
+        default=None,
         help="Lower bound for GP RBF length scales in standardized coordinates.",
     )
     parser.add_argument(
@@ -381,7 +381,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs"),
+        default=None,
         help="Directory where figures are saved.",
     )
     parser.add_argument(
@@ -446,9 +446,58 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--verbose-optimizer-diagnostics", action="store_true",
-        help="Show full candidate optimizer diagnostics and detailed output in the positivity study.",
+        help="Show full candidate optimizer diagnostics in positivity and robot studies.",
     )
+    parser.add_argument("--robot-study", action="store_true",
+                        help="Compare central random-walk robots with ideal static references; double RBF + clipping.")
+    parser.add_argument("--n-robots", type=int, default=20, help="Number of mobile robots (default: 20).")
+    parser.add_argument("--n-steps", type=int, default=40, help="Acquisitions per robot including initial (default: 40).")
+    parser.add_argument("--robot-step", type=float, default=60., help="Move length in grid units (default: 60).")
+    parser.add_argument("--robot-start-radius", type=float, default=150., help="Deployment radius in grid units (default: 150).")
+    parser.add_argument("--robot-start-center", type=float, nargs=2, metavar=("X", "Y"),
+                        help="Optional deployment center; default is the nearest sea cell to the largest component centroid.")
+    parser.add_argument("--robot-checkpoints", type=int, nargs="+", default=[100, 200, 400, 800],
+                        help="Measurement budgets at which to fit (default: 100 200 400 800).")
+    parser.add_argument("--robot-gif", action="store_true",
+                        help="Save GP overview and robots-only GIFs with a two-second end pause; no extra fits.")
     args = parser.parse_args()
+    if args.n_samples is None:
+        args.n_samples = args.n_robots * args.n_steps if args.robot_study else 200
+    if args.length_scale_lower_bound is None:
+        args.length_scale_lower_bound = .02 if args.robot_study else .05
+    if args.output_dir is None:
+        args.output_dir = Path("outputs/robot_sampling" if args.robot_study else "outputs")
+    if args.concentration_display_threshold is None:
+        args.concentration_display_threshold = .01 if args.robot_study else 0.
+    if args.robot_gif and not args.robot_study:
+        parser.error("--robot-gif requires --robot-study.")
+    if args.robot_study:
+        if any((args.inspect_netcdf, args.print_dataset, args.plot_concentration_map,
+                args.peak_diagnostics, args.peak_sampling_study, args.peak_kernel_study, args.positivity_study,
+                args.kernel_comparison_study, args.sample_size_study, args.sample_size_study_multiseed,
+                args.optimizer_initialization_study, args.optimizer_restart_study,
+                args.length_scale_lower_bound_study, args.length_scale_upper_bound_study,
+                args.length_scale_local_sensitivity_study)):
+            parser.error("--robot-study cannot be combined with other studies or inspection modes.")
+        if not (args.current_informed or (args.physically_informed and args.physics_source == "current")):
+            parser.error("--robot-study requires current-informed coordinates.")
+        if (args.kernel_mode != "anisotropic" or args.target_transform != "none" or args.noise_std != 0
+                or args.n_restarts != 0 or not args.clip_negative):
+            parser.error("Robot baseline requires anisotropic kernels, target none, no sensor noise/restarts and clipping.")
+        if args.n_robots < 1 or args.n_steps < 1 or args.n_samples != args.n_robots * args.n_steps:
+            parser.error("Robot budget must equal positive n-robots * n-steps; omit --n-samples or set it to that product.")
+        if (args.robot_checkpoints != sorted(set(args.robot_checkpoints))
+                or any(n < args.n_robots or n > args.n_samples or n % args.n_robots for n in args.robot_checkpoints)
+                or args.robot_checkpoints[-1] != args.n_samples):
+            parser.error("Robot checkpoints must increase, be multiples of n-robots and end at the total budget.")
+        if any(not math.isfinite(v) or v <= 0 for v in (args.robot_step, args.robot_start_radius, args.peak_radius)):
+            parser.error("Robot step, start radius and diagnostic radius must be finite and positive.")
+        if args.random_seed < 0 or (args.robot_start_center and not all(map(math.isfinite, args.robot_start_center))):
+            parser.error("Provide a nonnegative sampling seed and finite deployment center.")
+        if not (0 < args.length_scale_lower_bound <= .075 and 1 <= args.length_scale_upper_bound < math.inf):
+            parser.error("Robot initializations require finite length-scale bounds containing [0.075, 1].")
+        if not math.isfinite(args.concentration_display_threshold) or args.concentration_display_threshold < 0:
+            parser.error("Concentration display threshold must be finite and nonnegative.")
     if args.positivity_study and (args.peak_kernel_study or args.peak_sampling_study or args.peak_diagnostics):
         parser.error("--positivity-study is a standalone controlled comparison.")
     if args.peak_kernel_study or args.positivity_study:
