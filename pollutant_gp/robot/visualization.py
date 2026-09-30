@@ -2,11 +2,86 @@
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
-from matplotlib.colors import ListedColormap
-from matplotlib.patches import Circle, Polygon
+from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.patches import Circle, Patch, Polygon, Rectangle
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 from PIL import Image
+
+from pollutant_gp.robot.trajectories import connected_geometry, grid_geometry
+
+
+# Show categorical connectivity and the centroid-to-cell projection without concentration data.
+def plot_connected_components(grid, walk, radius, base, unit):
+    components, principal, centroid, central_cell = connected_geometry(grid)
+    count = int(components.max())
+    sizes = np.bincount(components.ravel())[1:]
+    automatic = np.array([grid.x_grid.ravel()[central_cell], grid.y_grid.ravel()[central_cell]])
+    _, spacing = grid_geometry(grid)
+    colors = plt.get_cmap("Set3" if count <= 12 else "turbo", max(count, 2))(np.arange(count))
+    cmap = ListedColormap(["white", *colors])
+    norm = BoundaryNorm(np.arange(count + 2) - .5, cmap.N)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5.8))
+    for axis in axes:
+        mesh = axis.pcolormesh(grid.x_grid, grid.y_grid, components, cmap=cmap, norm=norm, shading="auto")
+        axis.scatter(*centroid, marker="o", s=90, facecolors="none", edgecolors="#b2182b",
+                     linewidths=2, label="Principal component centroid", zorder=4)
+        axis.scatter(*automatic, marker="x", s=60, color="black", linewidths=2,
+                     label="Nearest valid cell center", zorder=5)
+        axis.add_patch(Circle(walk.center, radius, fill=False, color="#333333", linestyle="--",
+                              label=f"Deployment disk (r = {radius:g} {unit})"))
+        if not np.array_equal(walk.center, automatic):
+            axis.scatter(*walk.center, marker="+", s=100, color="#e66101", label="Custom deployment center")
+        axis.set(xlabel=f"x ({unit})", ylabel=f"y ({unit})", aspect="equal")
+        axis.ticklabel_format(useOffset=False)
+        axis.xaxis.set_major_locator(MaxNLocator(3))
+        axis.yaxis.set_major_locator(MaxNLocator(4))
+        axis.tick_params(labelsize=9)
+    axes[0].set_title(f"Valid-mask components: {count}\nPrincipal component: {principal} ({sizes[principal - 1]} cells)", fontsize=11)
+    half_span = 2.5 * np.abs(spacing)
+    axes[1].set(xlim=(automatic[0] - half_span[0], automatic[0] + half_span[0]),
+                ylim=(automatic[1] - half_span[1], automatic[1] + half_span[1]))
+    axes[1].add_patch(Rectangle(automatic - np.abs(spacing) / 2, *np.abs(spacing),
+                                fill=False, edgecolor="black", linewidth=1))
+    axes[1].set_title(f"Center selection (zoom)\nCentroid-to-cell distance: {np.linalg.norm(centroid - automatic):.3g} {unit}", fontsize=11)
+    handles, labels = axes[0].get_legend_handles_labels()
+    if count <= 6:
+        handles.extend(Patch(facecolor=colors[i], label=f"Component {i + 1}") for i in range(count))
+        labels.extend(f"Component {i + 1}" for i in range(count))
+    else:
+        fig.colorbar(mesh, ax=axes, ticks=np.arange(1, count + 1), label="Component ID", shrink=.6)
+    fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=9, frameon=False)
+    fig.subplots_adjust(bottom=.23, top=.88, wspace=.4)
+    path = base.with_name(base.name + "_components.png")
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
+
+
+# Plot acquisition-time separation only; thresholds are diagnostics rather than safety limits.
+def plot_robot_proximity(rows, base, unit, thresholds=(10., 20.)):
+    fig, axes = plt.subplots(2, 1, figsize=(9, 6), sharex=True, constrained_layout=True)
+    times = [row["acquisition"] for row in rows]
+    axes[0].plot(times, [np.nan if row["min_distance"] is None else row["min_distance"] for row in rows],
+                 color="#173f5f", marker="o", markersize=3, label="Minimum pair distance")
+    for threshold, color in zip(thresholds, ("#b2182b", "#d98c00")):
+        axes[0].axhline(threshold, color=color, linestyle="--", label=f"{threshold:g} {unit}")
+    axes[0].set(ylabel=f"Minimum distance ({unit})")
+    axes[0].legend(fontsize=9)
+    axes[1].step(times, [row["same_cell_pairs"] for row in rows], where="mid", color="black",
+                 marker="x", markersize=4, zorder=4, label="Same cell")
+    for threshold, color in zip(thresholds, ("#b2182b", "#d98c00")):
+        axes[1].step(times, [row[f"pairs_lt_{threshold:g}"] for row in rows], where="mid",
+                     color=color, label=f"Distance < {threshold:g} {unit}")
+    axes[1].set(xlabel="Acquisition index (initial positions included)", ylabel="Simultaneous unordered pairs")
+    axes[1].yaxis.set_major_locator(MaxNLocator(integer=True))
+    axes[1].legend(fontsize=9)
+    for axis in axes:
+        axis.grid(alpha=.25)
+    path = base.with_name(base.name + "_proximity.png")
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
 
 
 # Extend the encoded last frame, avoiding extra renders or artificial robot states.

@@ -13,8 +13,8 @@ from pollutant_gp.peak_kernel import INITIALIZATIONS, print_kernel_fit, select_c
 from pollutant_gp.peak_sampling import common_unsampled_mask
 from pollutant_gp.positivity import prediction_metrics
 from pollutant_gp.reconstruction import reconstruct_field
-from pollutant_gp.robot.trajectories import observations_up_to, simulate_random_walk, uniform_reference
-from pollutant_gp.robot.visualization import plot_robot_results
+from pollutant_gp.robot.trajectories import measure_robot_proximity, observations_up_to, simulate_random_walk, uniform_reference
+from pollutant_gp.robot.visualization import plot_connected_components, plot_robot_proximity, plot_robot_results
 
 
 # Write ordinary rows so diagnostics can be inspected without loading Python objects.
@@ -23,6 +23,26 @@ def write_rows(path, rows):
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+# Save geometry-only diagnostics from a generated or archived walk, without GP fitting.
+def save_robot_geometry_diagnostics(grid, walk, radius, base, unit):
+    base.parent.mkdir(parents=True, exist_ok=True)
+    rows, summary = measure_robot_proximity(walk)
+    rows = [dict(distance_unit=unit, **row) for row in rows]
+    summary = dict(distance_unit=unit, **summary)
+    paths = [base.with_name(base.name + "_proximity.csv"),
+             base.with_name(base.name + "_proximity_summary.csv")]
+    write_rows(paths[0], rows)
+    write_rows(paths[1], [summary])
+    paths.append(plot_connected_components(grid, walk, radius, base, unit))
+    paths.append(plot_robot_proximity(rows, base, unit))
+    minimum = summary["minimum_distance"]
+    minimum_text = "undefined (one robot)" if minimum is None else f"{minimum:.6g}"
+    print(f"Robot proximity (acquisition instants only): minimum={minimum_text} {unit}; "
+          f"same-cell pair-instants={summary['same_cell_pair_instants']}; "
+          f"see proximity CSV for <10/<20 {unit} counts. No collision avoidance.")
+    return paths
 
 
 # Reuse GP fitting and metrics; only the source of observations changes.
@@ -46,6 +66,7 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     optimizer_seed = seed if args.optimizer_seed is None else args.optimizer_seed
     base = output_path.with_name(f"{output_path.stem}_seed_{seed}_robot")
     base.parent.mkdir(parents=True, exist_ok=True)
+    geometry_paths = save_robot_geometry_diagnostics(grid, walk, args.robot_start_radius, base, coordinate_unit)
     print("\n=== Robot sampling: frozen field, two RBFs, direct + clipping ===")
     print(f"Seed={seed}; deployment center={walk.center}; radius={args.robot_start_radius:g} {coordinate_unit}")
     print(f"{args.n_robots} robots x {args.n_steps} acquisitions = {budget} measurements (initial included)")
@@ -139,7 +160,7 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
             write_rows(base.with_name(base.name + "_metrics.csv"), rows)
     fields_path = base.with_name(base.name + "_fields.npz")
     np.savez_compressed(fields_path, **saved)
-    paths = plot_robot_results(grid, walk, results, rows, args, base, coordinate_unit)
+    paths = geometry_paths + plot_robot_results(grid, walk, results, rows, args, base, coordinate_unit)
     print(f"\nSaved metrics/optimizer CSV and replay fields: {fields_path}")
     for path in paths:
         print(f"Saved: {path}")
