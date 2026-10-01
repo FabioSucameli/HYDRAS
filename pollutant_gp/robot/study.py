@@ -17,6 +17,10 @@ from pollutant_gp.robot.trajectories import measure_robot_proximity, observation
 from pollutant_gp.robot.visualization import plot_connected_components, plot_robot_proximity, plot_robot_results
 
 
+class RobotFitError(RuntimeError):
+    """No converged candidate for one checkpoint/layout."""
+
+
 # Write ordinary rows so diagnostics can be inspected without loading Python objects.
 def write_rows(path, rows):
     with path.open("w", newline="", encoding="utf-8") as stream:
@@ -46,7 +50,7 @@ def save_robot_geometry_diagnostics(grid, walk, radius, base, unit):
 
 
 # Reuse GP fitting and metrics; only the source of observations changes.
-def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_unit):
+def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_unit, *, save_artifacts=True):
     if coordinate_transform is None:
         raise ValueError("Robot study requires current-informed coordinates.")
     seed = args.random_seed
@@ -66,7 +70,8 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     optimizer_seed = seed if args.optimizer_seed is None else args.optimizer_seed
     base = output_path.with_name(f"{output_path.stem}_seed_{seed}_robot")
     base.parent.mkdir(parents=True, exist_ok=True)
-    geometry_paths = save_robot_geometry_diagnostics(grid, walk, args.robot_start_radius, base, coordinate_unit)
+    geometry_paths = (save_robot_geometry_diagnostics(grid, walk, args.robot_start_radius, base, coordinate_unit)
+                      if save_artifacts else [])
     print("\n=== Robot sampling: frozen field, two RBFs, direct + clipping ===")
     print(f"Seed={seed}; deployment center={walk.center}; radius={args.robot_start_radius:g} {coordinate_unit}")
     print(f"{args.n_robots} robots x {args.n_steps} acquisitions = {budget} measurements (initial included)")
@@ -120,7 +125,10 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
                         print(f"WARNING {name}: status={run.status}; {run.message}", flush=True)
                     candidates.append((name, model, scaler, diagnostic))
                 write_rows(base.with_name(base.name + "_optimizer.csv"), optimizer_rows)
-                name, model, _, diagnostic = select_converged_fit(candidates)
+                try:
+                    name, model, _, diagnostic = select_converged_fit(candidates)
+                except RuntimeError as error:
+                    raise RobotFitError(f"Seed {seed}, N={count}, {layout}: {error}") from error
                 raw = reconstruct_field(grid, model, scaler, args.prediction_batch_size,
                                         "none", False, coordinate_transform)
                 prediction = np.maximum(raw.mean_field, 0)
@@ -149,19 +157,21 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
                        nearest_sensor_distance=peak.nearest_sensor_distance,
                        local_sensor_count=peak.local_sensor_count, true_peak_sampled=peak.true_peak_sampled)
             rows.append(row)
-            results[(layout, count)] = reconstruction
-            tag = f"{layout.lower().replace(' ', '_')}_{count}"
-            saved[tag + "_indices"] = indices
-            saved[tag + "_raw_mean"] = raw_mean
-            saved[tag + "_std"] = reconstruction.std_field
+            if save_artifacts:
+                results[(layout, count)] = reconstruction
+                tag = f"{layout.lower().replace(' ', '_')}_{count}"
+                saved[tag + "_indices"] = indices
+                saved[tag + "_raw_mean"] = raw_mean
+                saved[tag + "_std"] = reconstruction.std_field
             print(f"Selected {name}; LML={diagnostic.final_lml:.6g}; "
                   f"unseen RMSE global={row['unseen_global_rmse']:.6g}, local={row['unseen_local_rmse']:.6g}; "
                   f"prediction at true peak={peak.prediction_at_true_peak:.6g}", flush=True)
             write_rows(base.with_name(base.name + "_metrics.csv"), rows)
-    fields_path = base.with_name(base.name + "_fields.npz")
-    np.savez_compressed(fields_path, **saved)
-    paths = geometry_paths + plot_robot_results(grid, walk, results, rows, args, base, coordinate_unit)
-    print(f"\nSaved metrics/optimizer CSV and replay fields: {fields_path}")
-    for path in paths:
-        print(f"Saved: {path}")
+    if save_artifacts:
+        fields_path = base.with_name(base.name + "_fields.npz")
+        np.savez_compressed(fields_path, **saved)
+        paths = geometry_paths + plot_robot_results(grid, walk, results, rows, args, base, coordinate_unit)
+        print(f"\nSaved metrics/optimizer CSV and replay fields: {fields_path}")
+        for path in paths:
+            print(f"Saved: {path}")
     return rows, walk, common
