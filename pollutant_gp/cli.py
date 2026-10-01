@@ -450,23 +450,39 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--robot-study", action="store_true",
                         help="Compare central random-walk robots with ideal static references; double RBF + clipping.")
+    parser.add_argument("--robot-study-multiseed", action="store_true",
+                        help="Run the same robot protocol over multiple seeds, saving aggregate metrics and a figure.")
+    parser.add_argument("--robot-study-seeds", type=int, nargs="+", default=None,
+                        help="Distinct nonnegative seeds for --robot-study-multiseed (default: 1 through 100).")
     parser.add_argument("--n-robots", type=int, default=20, help="Number of mobile robots (default: 20).")
     parser.add_argument("--n-steps", type=int, default=40, help="Acquisitions per robot including initial (default: 40).")
     parser.add_argument("--robot-step", type=float, default=60., help="Move length in grid units (default: 60).")
     parser.add_argument("--robot-start-radius", type=float, default=150., help="Deployment radius in grid units (default: 150).")
     parser.add_argument("--robot-start-center", type=float, nargs=2, metavar=("X", "Y"),
                         help="Optional deployment center; default is the nearest sea cell to the largest component centroid.")
-    parser.add_argument("--robot-checkpoints", type=int, nargs="+", default=[100, 200, 400, 800],
-                        help="Measurement budgets at which to fit (default: 100 200 400 800).")
+    parser.add_argument("--robot-checkpoints", type=int, nargs="+", default=[100, 200, 300, 400, 500, 600, 700, 800],
+                        help="Measurement budgets at which to fit (default: 100 200 ... 800).")
     parser.add_argument("--robot-gif", action="store_true",
                         help="Save GP overview and robots-only GIFs with a two-second end pause; no extra fits.")
     args = parser.parse_args()
+    if args.robot_study_seeds is not None and not args.robot_study_multiseed:
+        parser.error("--robot-study-seeds requires --robot-study-multiseed.")
+    if args.robot_study_multiseed:
+        args.robot_study = True
+        if args.robot_study_seeds is None:
+            args.robot_study_seeds = list(range(1, 101))
+        if (len(args.robot_study_seeds) < 2 or min(args.robot_study_seeds) < 0
+                or len(set(args.robot_study_seeds)) != len(args.robot_study_seeds)):
+            parser.error("Robot multiseed requires at least two distinct nonnegative seeds.")
+        if args.robot_gif:
+            parser.error("Multiseed saves aggregate figures, not per-seed GIFs; omit --robot-gif.")
     if args.n_samples is None:
         args.n_samples = args.n_robots * args.n_steps if args.robot_study else 200
     if args.length_scale_lower_bound is None:
         args.length_scale_lower_bound = .02 if args.robot_study else .05
     if args.output_dir is None:
-        args.output_dir = Path("outputs/robot_sampling" if args.robot_study else "outputs")
+        args.output_dir = Path("outputs/robot_multiseed" if args.robot_study_multiseed else
+                               "outputs/robot_sampling" if args.robot_study else "outputs")
     if args.concentration_display_threshold is None:
         args.concentration_display_threshold = .01 if args.robot_study else 0.
     if args.robot_gif and not args.robot_study:
