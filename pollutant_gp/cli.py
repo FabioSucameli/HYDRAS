@@ -449,7 +449,9 @@ def parse_args() -> argparse.Namespace:
         help="Show full candidate optimizer diagnostics in positivity and robot studies.",
     )
     parser.add_argument("--robot-study", action="store_true",
-                        help="Compare central random-walk robots with ideal static references; double RBF + clipping.")
+                        help="Compare random-walk robots with ideal static references; double RBF + clipping.")
+    parser.add_argument("--robot-deployment", choices=("central", "uniform-domain"), default="uniform-domain",
+                        help="Initial cells: central disk (legacy default) or uniform over all valid marine cells.")
     parser.add_argument("--robot-study-multiseed", action="store_true",
                         help="Run the same robot protocol over multiple seeds, saving aggregate metrics and a figure.")
     parser.add_argument("--robot-study-seeds", type=int, nargs="+", default=None,
@@ -487,7 +489,11 @@ def parse_args() -> argparse.Namespace:
         args.concentration_display_threshold = .01 if args.robot_study else 0.
     if args.robot_gif and not args.robot_study:
         parser.error("--robot-gif requires --robot-study.")
+    if args.robot_deployment != "central" and not args.robot_study:
+        parser.error("--robot-deployment uniform-domain requires a robot study.")
     if args.robot_study:
+        if args.robot_deployment == "uniform-domain" and args.robot_start_center is not None:
+            parser.error("Uniform-domain deployment cannot use --robot-start-center; the start radius is unused.")
         if any((args.inspect_netcdf, args.print_dataset, args.plot_concentration_map,
                 args.peak_diagnostics, args.peak_sampling_study, args.peak_kernel_study, args.positivity_study,
                 args.kernel_comparison_study, args.sample_size_study, args.sample_size_study_multiseed,
