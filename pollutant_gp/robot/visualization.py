@@ -21,6 +21,21 @@ def plot_connected_components(grid, walk, radius, base, unit):
     colors = plt.get_cmap("Set3" if count <= 12 else "turbo", max(count, 2))(np.arange(count))
     cmap = ListedColormap(["white", *colors])
     norm = BoundaryNorm(np.arange(count + 2) - .5, cmap.N)
+    if walk.center is None:
+        fig, axis = plt.subplots(figsize=(9, 7), constrained_layout=True)
+        mesh = axis.pcolormesh(grid.x_grid, grid.y_grid, components, cmap=cmap, norm=norm, shading="auto")
+        axis.scatter(*walk.positions[0].T, s=35, facecolors="white", edgecolors="black", label="Initial robots")
+        axis.set(xlabel=f"x ({unit})", ylabel=f"y ({unit})", aspect="equal",
+                 title=f"Uniform-domain deployment | {len(walk.positions[0])} distinct cells\n"
+                       f"All {count} valid-mask components eligible; no deployment disk")
+        axis.ticklabel_format(useOffset=False)
+        axis.xaxis.set_major_locator(MaxNLocator(4))
+        axis.legend(fontsize=9)
+        fig.colorbar(mesh, ax=axis, ticks=np.arange(1, count + 1), label="Component ID")
+        path = base.with_name(base.name + "_components.png")
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        return path
     fig, axes = plt.subplots(1, 2, figsize=(11, 5.8))
     for axis in axes:
         mesh = axis.pcolormesh(grid.x_grid, grid.y_grid, components, cmap=cmap, norm=norm, shading="auto")
@@ -85,10 +100,10 @@ def plot_robot_proximity(rows, base, unit, thresholds=(10., 20.)):
 
 
 # Extend the encoded last frame, avoiding extra renders or artificial robot states.
-def save_paused_gif(figure, update, n_steps, path):
+def save_paused_gif(figure, update, n_steps, path, dpi=90):
     fps = 4
     animation = FuncAnimation(figure, update, frames=n_steps, interval=1000 / fps, repeat=False)
-    animation.save(path, writer=PillowWriter(fps=fps), dpi=90)
+    animation.save(path, writer=PillowWriter(fps=fps), dpi=dpi)
     frames, durations = [], []
     with Image.open(path) as gif:
         for index in range(gif.n_frames):
@@ -106,19 +121,27 @@ def plot_robot_movement(grid, walk, args, base, unit):
     draw_map(axis, grid, np.full_like(grid.field, np.nan), 1, unit)
     points = walk.positions.reshape(-1, 2)
     span = np.ptp(points, axis=0)
-    margin = max(float(span.max()) * .12, args.robot_start_radius * .5)
-    axis.set(xlim=(points[:, 0].min() - margin, points[:, 0].max() + margin),
-             ylim=(points[:, 1].min() - margin, points[:, 1].max() + margin))
-    axis.add_patch(Circle(walk.center, args.robot_start_radius, fill=False,
-                          color="#173f5f", linestyle="--", linewidth=.8, alpha=.45))
-    trails = [axis.plot([], [], color="#173f5f", linewidth=.8, alpha=.35)[0]
+    if walk.center is None:
+        # pcolormesh extends half a cell beyond the extreme grid centers.
+        _, spacing = grid_geometry(grid)
+        half = np.abs(spacing) / 2
+        axis.set(xlim=(grid.x_grid.min() - half[0], grid.x_grid.max() + half[0]),
+                 ylim=(grid.y_grid.min() - half[1], grid.y_grid.max() + half[1]))
+    else:
+        margin = max(float(span.max()) * .12, args.robot_start_radius * .5)
+        axis.set(xlim=(points[:, 0].min() - margin, points[:, 0].max() + margin),
+                 ylim=(points[:, 1].min() - margin, points[:, 1].max() + margin))
+    if walk.center is not None:
+        axis.add_patch(Circle(walk.center, args.robot_start_radius, fill=False,
+                              color="#173f5f", linestyle="--", linewidth=.8, alpha=.45))
+    trails = [axis.plot([], [], color="#173f5f", linewidth=.9, alpha=.45)[0]
               for _ in range(args.n_robots)]
     # Glyph dimensions are schematic, not physical vessel dimensions.
     upper_hull = np.array([[-.8, .25], [.55, .25], [1., .47], [.55, .7], [-.8, .7]])
     lower_hull = upper_hull * [1, -1]
     bridge = np.array([[-.4, -.4], [.35, -.4], [.35, .4], [-.4, .4]])
     shapes = (upper_hull, lower_hull, bridge)
-    size = (span.max() + 2 * margin) * .010
+    size = max(np.ptp(axis.get_xlim()), np.ptp(axis.get_ylim())) * .010
     robots = []
     for _ in range(args.n_robots):
         patches = []
@@ -142,11 +165,11 @@ def plot_robot_movement(grid, walk, args, base, unit):
             for patch, vertices in zip(patches, shapes):
                 patch.set_xy(size * vertices @ rotation.T + walk.positions[step, robot])
             trails[robot].set_data(walk.positions[:step + 1, robot, 0], walk.positions[:step + 1, robot, 1])
-        heading.set_text(f"Marine robots | seed {args.random_seed}\n"
+        heading.set_text(f"Marine robots | {walk.deployment} | seed {args.random_seed}\n"
                          f"Acquisition {step + 1}/{args.n_steps} | N={(step + 1) * args.n_robots}")
 
     path = base.with_name(base.name + "_robots_only.gif")
-    save_paused_gif(figure, update, args.n_steps, path)
+    save_paused_gif(figure, update, args.n_steps, path, dpi=120)
     plt.close(figure)
     return path
 
@@ -178,13 +201,16 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit):
                *(float(np.max(r.mean_field[grid.valid_mask])) for r in results.values()), 1e-12)
     stdmax = max(*(float(np.max(r.std_field[grid.valid_mask])) for r in results.values()), 1e-12)
     checkpoints = args.robot_checkpoints
-    title = f"{args.nc_file.stem} | time index {args.time_index} | sampling seed {args.random_seed}"
+    title = (f"{args.nc_file.stem} | time index {args.time_index} | sampling seed {args.random_seed}"
+             f" | {walk.deployment}")
 
     fig, axis = plt.subplots(figsize=(9, 7), constrained_layout=True)
     mesh = draw_map(axis, grid, grid.field, vmax, unit, threshold)
-    axis.add_patch(Circle(walk.center, args.robot_start_radius, fill=False, color="#173f5f", linestyle="--"))
+    if walk.center is not None:
+        axis.add_patch(Circle(walk.center, args.robot_start_radius, fill=False, color="#173f5f", linestyle="--"))
     axis.scatter(*walk.positions[0].T, s=24, facecolors="white", edgecolors="#173f5f", label="Initial robots")
-    axis.scatter(*walk.center, marker="+", s=90, c="black", label="Geometric deployment center")
+    if walk.center is not None:
+        axis.scatter(*walk.center, marker="+", s=90, c="black", label="Geometric deployment center")
     axis.legend(fontsize=9)
     axis.set_title(f"{title}\nDeployment from geometry only; display threshold {threshold:g}", fontsize=10)
     fig.colorbar(mesh, ax=axis, label="Concentration")
@@ -257,7 +283,8 @@ def plot_robot_gifs(grid, walk, results, args, base, unit):
                *(float(np.max(r.mean_field[grid.valid_mask])) for r in results.values()), 1e-12)
     stdmax = max(*(float(np.max(r.std_field[grid.valid_mask])) for r in results.values()), 1e-12)
     checkpoints = args.robot_checkpoints
-    title = f"{args.nc_file.stem} | time index {args.time_index} | sampling seed {args.random_seed}"
+    title = (f"{args.nc_file.stem} | time index {args.time_index} | sampling seed {args.random_seed}"
+             f" | {walk.deployment}")
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
     empty = np.full_like(grid.field, np.nan)
     truth_mesh = draw_map(axes[0], grid, grid.field, vmax, unit, threshold)

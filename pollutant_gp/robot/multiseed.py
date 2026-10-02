@@ -51,7 +51,7 @@ def aggregate_robot_rows(rows, checkpoints):
 
 
 # Keep colors and markers distinct; error bars avoid overlapping shaded uncertainty bands.
-def plot_robot_multiseed(summary, path, requested, completed):
+def plot_robot_multiseed(summary, path, requested, completed, deployment="central"):
     styles = (("#0072B2", "o", "-"), ("#D55E00", "s", "--"), ("#009E73", "^", "-."))
     fig, axes = plt.subplots(2, 1, figsize=(9, 9), sharex=True, layout="constrained")
     for ax, metric, title in zip(axes, CURVE_METRICS, ("Global reconstruction", "Peak region (fixed diagnostic disk)")):
@@ -70,9 +70,9 @@ def plot_robot_multiseed(summary, path, requested, completed):
     axes[0].legend(frameon=False, fontsize=10, loc="best")
     axes[-1].set_xticks(sorted({r["checkpoint"] for r in summary}))
     axes[-1].set_xlabel("Nominal acquisition budget (distinct count matched for Uniform distinct)")
-    fig.suptitle(f"Robot sampling | {completed}/{requested} complete seeds\n"
+    fig.suptitle(f"Robot sampling | {deployment} | {completed}/{requested} complete seeds\n"
                  "Mean +/- 1 sample standard deviation" if completed >= 2 else
-                 f"Robot sampling | {completed}/{requested} complete seeds\nStandard deviation unavailable",
+                 f"Robot sampling | {deployment} | {completed}/{requested} complete seeds\nStandard deviation unavailable",
                  fontsize=13)
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -114,7 +114,7 @@ def run_robot_multiseed(args, grid, coordinate_transform, output_path, coordinat
             write_rows(root / "final_summary.csv", final)
     completed = sum(s["status"] == "complete" for s in statuses)
     if rows:
-        plot_robot_multiseed(curves, root / "multiseed_rmse.png", len(statuses), completed)
+        plot_robot_multiseed(curves, root / "multiseed_rmse.png", len(statuses), completed, args.robot_deployment)
     print(f"Completed {completed}/{len(statuses)} seeds. Final budget: {args.robot_checkpoints[-1]}; results: {root}", flush=True)
     if completed < 2:
         raise RuntimeError("Fewer than two complete seeds: descriptive mean only, no multi-seed standard deviation.")

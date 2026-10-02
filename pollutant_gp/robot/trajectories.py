@@ -11,7 +11,8 @@ class RobotWalk:
     positions: np.ndarray
     cell_indices: np.ndarray
     rejected: np.ndarray
-    center: np.ndarray
+    center: np.ndarray | None
+    deployment: str = "central"
 
 
 # Validate the regular Cartesian grid and retain signed spacing for descending axes.
@@ -78,8 +79,20 @@ def connected_geometry(grid):
     return components, principal, centroid, int(central_cell)
 
 
-# Select distinct central deployment cells using geometry, never source or peak location.
-def initial_positions(grid, n_robots, radius, seed, center=None):
+# Select distinct cells in a central disk or the whole valid domain, without concentrations.
+def initial_positions(grid, n_robots, radius, seed, center=None, deployment="central"):
+    if deployment not in ("central", "uniform-domain"):
+        raise ValueError("Unknown robot deployment mode.")
+    if deployment == "uniform-domain":
+        grid_geometry(grid)
+        if center is not None:
+            raise ValueError("Uniform-domain deployment does not use a center.")
+        candidates = np.flatnonzero(grid.valid_mask)
+        if n_robots < 1 or n_robots > len(candidates):
+            raise ValueError("Robot count must fit within the distinct valid domain cells.")
+        rng = np.random.default_rng(np.random.SeedSequence([seed, 0]))
+        chosen = rng.choice(candidates, n_robots, replace=False)
+        return np.column_stack((grid.x_grid.ravel()[chosen], grid.y_grid.ravel()[chosen])), None
     if n_robots < 1 or not np.isfinite(radius) or radius <= 0:
         raise ValueError("Robot count and deployment radius must be positive.")
     components, _, _, central_cell = connected_geometry(grid)
@@ -103,10 +116,10 @@ def initial_positions(grid, n_robots, radius, seed, center=None):
 
 
 # Count the initial observation as acquisition one; invalid moves consume budget in place.
-def simulate_random_walk(grid, n_robots, n_steps, step_length, radius, seed, center=None):
+def simulate_random_walk(grid, n_robots, n_steps, step_length, radius, seed, center=None, deployment="central"):
     if n_steps < 1 or not np.isfinite(step_length) or step_length <= 0:
         raise ValueError("Acquisition count and step length must be positive.")
-    starts, center = initial_positions(grid, n_robots, radius, seed, center)
+    starts, center = initial_positions(grid, n_robots, radius, seed, center, deployment)
     positions = np.empty((n_steps, n_robots, 2))
     positions[0] = starts
     rejected = np.zeros((n_steps, n_robots), dtype=bool)
@@ -119,7 +132,7 @@ def simulate_random_walk(grid, n_robots, n_steps, step_length, radius, seed, cen
             end = start + moves[robot]
             rejected[t, robot] = not segment_is_navigable(grid, start, end)
             positions[t, robot] = start if rejected[t, robot] else end
-    return RobotWalk(positions, cell_at(grid, positions), rejected, center)
+    return RobotWalk(positions, cell_at(grid, positions), rejected, center, deployment)
 
 
 # Keep the first noiseless observation of each cell in acquisition order.

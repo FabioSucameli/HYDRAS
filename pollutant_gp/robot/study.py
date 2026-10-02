@@ -56,7 +56,7 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     seed = args.random_seed
     budget = args.n_robots * args.n_steps
     walk = simulate_random_walk(grid, args.n_robots, args.n_steps, args.robot_step,
-                                args.robot_start_radius, seed, args.robot_start_center)
+                                args.robot_start_radius, seed, args.robot_start_center, args.robot_deployment)
     uniform = uniform_reference(grid, walk.cell_indices[0], budget, seed)
     common = common_unsampled_mask(grid, {"Robot": walk.cell_indices.ravel(), "Uniform": uniform})
     peak_index = np.argmax(np.where(grid.valid_mask, grid.field, -np.inf))
@@ -73,7 +73,11 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     geometry_paths = (save_robot_geometry_diagnostics(grid, walk, args.robot_start_radius, base, coordinate_unit)
                       if save_artifacts else [])
     print("\n=== Robot sampling: frozen field, two RBFs, direct + clipping ===")
-    print(f"Seed={seed}; deployment center={walk.center}; radius={args.robot_start_radius:g} {coordinate_unit}")
+    print(f"Seed={seed}; deployment={walk.deployment}")
+    if walk.center is None:
+        print("Initial cells sampled uniformly without replacement over all valid marine cells; no deployment disk.")
+    else:
+        print(f"Deployment center={walk.center}; radius={args.robot_start_radius:g} {coordinate_unit}")
     print(f"{args.n_robots} robots x {args.n_steps} acquisitions = {budget} measurements (initial included)")
     print(f"Step={args.robot_step:g} {coordinate_unit}; duplicates consume budget but are fitted once")
     print(f"Domain coordinate scale={scaler.scale_}; physical lower bounds={args.length_scale_lower_bound * scaler.scale_}")
@@ -82,7 +86,8 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     rows, optimizer_rows, results, cache = [], [], {}, {}
     saved = dict(truth=grid.field, valid=grid.valid_mask, x=grid.x_grid, y=grid.y_grid,
                  positions=walk.positions, visits=walk.cell_indices, rejected=walk.rejected,
-                 deployment_center=walk.center, uniform_indices=uniform,
+                 deployment_center=walk.center if walk.center is not None else np.empty(0),
+                 deployment=walk.deployment, uniform_indices=uniform,
                  common_unobserved=common, local=local, coordinate_mean=scaler.mean_,
                  coordinate_scale=scaler.scale_, rotation_degrees=coordinate_transform.angle_degrees,
                  config=json.dumps(vars(args), default=str), coordinate_unit=coordinate_unit,
@@ -140,7 +145,7 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
                 cache[key] = (reconstruction, raw.mean_field, metrics, peak, name, diagnostic)
             reconstruction, raw_mean, metrics, peak, name, diagnostic = cache[key]
             mobile_layout = layout == "Robot"
-            row = dict(seed=seed, checkpoint=count, layout=layout,
+            row = dict(seed=seed, checkpoint=count, layout=layout, deployment=walk.deployment,
                        measurements=count if layout != "Uniform distinct" else len(indices),
                        distinct_cells=len(indices),
                        revisits=count - len(indices) if mobile_layout else 0,
