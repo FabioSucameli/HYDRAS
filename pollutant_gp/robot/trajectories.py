@@ -1,4 +1,4 @@
-# Geometry-only random walks; concentration never controls robot motion.
+# Geometry-only motion; optional oracle deployment uses the true peak location.
 
 from dataclasses import dataclass
 
@@ -13,6 +13,9 @@ class RobotWalk:
     rejected: np.ndarray
     center: np.ndarray | None
     deployment: str = "central"
+    annulus_inner: float = 0.
+    annulus_outer: float = 0.
+    near_count: int = 0
 
 
 # Validate the regular Cartesian grid and retain signed spacing for descending axes.
@@ -79,10 +82,37 @@ def connected_geometry(grid):
     return components, principal, centroid, int(central_cell)
 
 
-# Select distinct cells in a central disk or the whole valid domain, without concentrations.
-def initial_positions(grid, n_robots, radius, seed, center=None, deployment="central"):
-    if deployment not in ("central", "uniform-domain"):
+# Select distinct starts; only peak-annulus uses privileged concentration information.
+def initial_positions(grid, n_robots, radius, seed, center=None, deployment="central",
+                      near_count=3, annulus_inner=50., annulus_outer=150.):
+    if deployment not in ("central", "uniform-domain", "peak-annulus"):
         raise ValueError("Unknown robot deployment mode.")
+    if deployment == "peak-annulus":
+        if center is not None:
+            raise ValueError("Peak-annulus uses the ground-truth maximum, not a custom center.")
+        if (not 1 <= near_count <= n_robots or not np.isfinite(annulus_inner)
+                or not np.isfinite(annulus_outer) or not 0 < annulus_inner < annulus_outer):
+            raise ValueError("Require 1 <= near_count <= n_robots and 0 < inner < outer radius.")
+        starts, _ = initial_positions(grid, n_robots, radius, seed, deployment="uniform-domain")
+        xy = np.column_stack((grid.x_grid.ravel(), grid.y_grid.ravel()))
+        valid = grid.valid_mask.ravel()
+        peak = int(np.argmax(np.where(valid, grid.field.ravel(), -np.inf)))
+        center = xy[peak]
+        distance = np.linalg.norm(xy - center, axis=1)
+        retained = cell_at(grid, starts[near_count:])
+        rng = np.random.default_rng(np.random.SeedSequence([seed, 3]))
+        # Preserve the other domain starts unless one is exactly the oracle peak.
+        if peak in retained:
+            pool = np.setdiff1d(np.flatnonzero(valid), np.append(retained, peak))
+            if not len(pool):
+                raise ValueError("Not enough distinct non-peak deployment cells.")
+            retained[retained == peak] = rng.choice(pool)
+        candidates = np.setdiff1d(np.flatnonzero(valid & (distance >= annulus_inner)
+                                                & (distance <= annulus_outer)), retained)
+        if len(candidates) < near_count:
+            raise ValueError(f"Only {len(candidates)} available annulus cells for {near_count} robots.")
+        chosen = np.concatenate((rng.choice(candidates, near_count, replace=False), retained))
+        return xy[chosen], center
     if deployment == "uniform-domain":
         grid_geometry(grid)
         if center is not None:
@@ -116,10 +146,12 @@ def initial_positions(grid, n_robots, radius, seed, center=None, deployment="cen
 
 
 # Count the initial observation as acquisition one; invalid moves consume budget in place.
-def simulate_random_walk(grid, n_robots, n_steps, step_length, radius, seed, center=None, deployment="central"):
+def simulate_random_walk(grid, n_robots, n_steps, step_length, radius, seed, center=None, deployment="central",
+                         near_count=3, annulus_inner=50., annulus_outer=150.):
     if n_steps < 1 or not np.isfinite(step_length) or step_length <= 0:
         raise ValueError("Acquisition count and step length must be positive.")
-    starts, center = initial_positions(grid, n_robots, radius, seed, center, deployment)
+    starts, center = initial_positions(grid, n_robots, radius, seed, center, deployment,
+                                       near_count, annulus_inner, annulus_outer)
     positions = np.empty((n_steps, n_robots, 2))
     positions[0] = starts
     rejected = np.zeros((n_steps, n_robots), dtype=bool)
@@ -132,7 +164,10 @@ def simulate_random_walk(grid, n_robots, n_steps, step_length, radius, seed, cen
             end = start + moves[robot]
             rejected[t, robot] = not segment_is_navigable(grid, start, end)
             positions[t, robot] = start if rejected[t, robot] else end
-    return RobotWalk(positions, cell_at(grid, positions), rejected, center, deployment)
+    return RobotWalk(positions, cell_at(grid, positions), rejected, center, deployment,
+                     annulus_inner if deployment == "peak-annulus" else 0.,
+                     annulus_outer if deployment == "peak-annulus" else 0.,
+                     near_count if deployment == "peak-annulus" else 0)
 
 
 # Keep the first noiseless observation of each cell in acquisition order.

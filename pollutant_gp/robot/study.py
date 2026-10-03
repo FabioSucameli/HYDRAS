@@ -56,7 +56,8 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     seed = args.random_seed
     budget = args.n_robots * args.n_steps
     walk = simulate_random_walk(grid, args.n_robots, args.n_steps, args.robot_step,
-                                args.robot_start_radius, seed, args.robot_start_center, args.robot_deployment)
+                                args.robot_start_radius, seed, args.robot_start_center, args.robot_deployment,
+                                args.robot_near_count, args.robot_annulus_inner, args.robot_annulus_outer)
     uniform = uniform_reference(grid, walk.cell_indices[0], budget, seed)
     common = common_unsampled_mask(grid, {"Robot": walk.cell_indices.ravel(), "Uniform": uniform})
     peak_index = np.argmax(np.where(grid.valid_mask, grid.field, -np.inf))
@@ -70,11 +71,17 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     optimizer_seed = seed if args.optimizer_seed is None else args.optimizer_seed
     base = output_path.with_name(f"{output_path.stem}_seed_{seed}_robot")
     base.parent.mkdir(parents=True, exist_ok=True)
-    geometry_paths = (save_robot_geometry_diagnostics(grid, walk, args.robot_start_radius, base, coordinate_unit)
+    geometry_paths = (save_robot_geometry_diagnostics(grid, walk,
+                      args.robot_annulus_outer if walk.deployment == "peak-annulus" else args.robot_start_radius,
+                      base, coordinate_unit)
                       if save_artifacts else [])
     print("\n=== Robot sampling: frozen field, two RBFs, direct + clipping ===")
     print(f"Seed={seed}; deployment={walk.deployment}")
-    if walk.center is None:
+    if walk.deployment == "peak-annulus":
+        print(f"ORACLE true-peak center={walk.center}; {args.robot_near_count} robots in annulus "
+              f"[{args.robot_annulus_inner:g}, {args.robot_annulus_outer:g}] {coordinate_unit}; "
+              "remaining robots retained from uniform-domain; no initial robot on the peak.")
+    elif walk.center is None:
         print("Initial cells sampled uniformly without replacement over all valid marine cells; no deployment disk.")
     else:
         print(f"Deployment center={walk.center}; radius={args.robot_start_radius:g} {coordinate_unit}")
@@ -87,7 +94,8 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     saved = dict(truth=grid.field, valid=grid.valid_mask, x=grid.x_grid, y=grid.y_grid,
                  positions=walk.positions, visits=walk.cell_indices, rejected=walk.rejected,
                  deployment_center=walk.center if walk.center is not None else np.empty(0),
-                 deployment=walk.deployment, uniform_indices=uniform,
+                 deployment=walk.deployment, annulus_inner=walk.annulus_inner,
+                 annulus_outer=walk.annulus_outer, near_count=walk.near_count, uniform_indices=uniform,
                  common_unobserved=common, local=local, coordinate_mean=scaler.mean_,
                  coordinate_scale=scaler.scale_, rotation_degrees=coordinate_transform.angle_degrees,
                  config=json.dumps(vars(args), default=str), coordinate_unit=coordinate_unit,

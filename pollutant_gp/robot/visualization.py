@@ -11,6 +11,15 @@ from PIL import Image
 from pollutant_gp.robot.trajectories import connected_geometry, grid_geometry
 
 
+# Mark privileged starts and the excluded inner disk without implying source knowledge.
+def draw_oracle_deployment(axis, walk):
+    for radius in (walk.annulus_inner, walk.annulus_outer):
+        axis.add_patch(Circle(walk.center, radius, fill=False, color="#b2182b", linestyle="--", linewidth=1))
+    axis.scatter(*walk.center, marker="+", s=70, color="#b2182b", label="True peak (oracle center)")
+    axis.scatter(*walk.positions[0, :walk.near_count].T, s=48, facecolors="#fdae61",
+                 edgecolors="black", label=f"{walk.near_count} annulus starts", zorder=5)
+
+
 # Show categorical connectivity and the centroid-to-cell projection without concentration data.
 def plot_connected_components(grid, walk, radius, base, unit):
     components, principal, centroid, central_cell = connected_geometry(grid)
@@ -21,13 +30,17 @@ def plot_connected_components(grid, walk, radius, base, unit):
     colors = plt.get_cmap("Set3" if count <= 12 else "turbo", max(count, 2))(np.arange(count))
     cmap = ListedColormap(["white", *colors])
     norm = BoundaryNorm(np.arange(count + 2) - .5, cmap.N)
-    if walk.center is None:
+    if walk.center is None or walk.deployment == "peak-annulus":
         fig, axis = plt.subplots(figsize=(9, 7), constrained_layout=True)
         mesh = axis.pcolormesh(grid.x_grid, grid.y_grid, components, cmap=cmap, norm=norm, shading="auto")
         axis.scatter(*walk.positions[0].T, s=35, facecolors="white", edgecolors="black", label="Initial robots")
         axis.set(xlabel=f"x ({unit})", ylabel=f"y ({unit})", aspect="equal",
                  title=f"Uniform-domain deployment | {len(walk.positions[0])} distinct cells\n"
                        f"All {count} valid-mask components eligible; no deployment disk")
+        if walk.deployment == "peak-annulus":
+            draw_oracle_deployment(axis, walk)
+            axis.set_title(f"Oracle peak-annulus deployment | {walk.near_count} near-peak robots\n"
+                           f"Annulus {walk.annulus_inner:g}-{walk.annulus_outer:g} {unit}; remaining starts uniform-domain")
         axis.ticklabel_format(useOffset=False)
         axis.xaxis.set_major_locator(MaxNLocator(4))
         axis.legend(fontsize=9)
@@ -121,7 +134,7 @@ def plot_robot_movement(grid, walk, args, base, unit):
     draw_map(axis, grid, np.full_like(grid.field, np.nan), 1, unit)
     points = walk.positions.reshape(-1, 2)
     span = np.ptp(points, axis=0)
-    if walk.center is None:
+    if walk.center is None or walk.deployment == "peak-annulus":
         # pcolormesh extends half a cell beyond the extreme grid centers.
         _, spacing = grid_geometry(grid)
         half = np.abs(spacing) / 2
@@ -131,7 +144,9 @@ def plot_robot_movement(grid, walk, args, base, unit):
         margin = max(float(span.max()) * .12, args.robot_start_radius * .5)
         axis.set(xlim=(points[:, 0].min() - margin, points[:, 0].max() + margin),
                  ylim=(points[:, 1].min() - margin, points[:, 1].max() + margin))
-    if walk.center is not None:
+    if walk.deployment == "peak-annulus":
+        draw_oracle_deployment(axis, walk)
+    elif walk.center is not None:
         axis.add_patch(Circle(walk.center, args.robot_start_radius, fill=False,
                               color="#173f5f", linestyle="--", linewidth=.8, alpha=.45))
     trails = [axis.plot([], [], color="#173f5f", linewidth=.9, alpha=.45)[0]
@@ -206,13 +221,16 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit):
 
     fig, axis = plt.subplots(figsize=(9, 7), constrained_layout=True)
     mesh = draw_map(axis, grid, grid.field, vmax, unit, threshold)
-    if walk.center is not None:
+    if walk.deployment == "peak-annulus":
+        draw_oracle_deployment(axis, walk)
+    elif walk.center is not None:
         axis.add_patch(Circle(walk.center, args.robot_start_radius, fill=False, color="#173f5f", linestyle="--"))
     axis.scatter(*walk.positions[0].T, s=24, facecolors="white", edgecolors="#173f5f", label="Initial robots")
-    if walk.center is not None:
+    if walk.center is not None and walk.deployment != "peak-annulus":
         axis.scatter(*walk.center, marker="+", s=90, c="black", label="Geometric deployment center")
     axis.legend(fontsize=9)
-    axis.set_title(f"{title}\nDeployment from geometry only; display threshold {threshold:g}", fontsize=10)
+    description = "Oracle peak-annulus deployment" if walk.deployment == "peak-annulus" else "Deployment from geometry only"
+    axis.set_title(f"{title}\n{description}; display threshold {threshold:g}", fontsize=10)
     fig.colorbar(mesh, ax=axis, label="Concentration")
     path = base.with_name(base.name + "_deployment.png")
     fig.savefig(path, dpi=180)
