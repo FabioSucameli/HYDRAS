@@ -450,8 +450,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--robot-study", action="store_true",
                         help="Compare random-walk robots with ideal static references; double RBF + clipping.")
-    parser.add_argument("--robot-deployment", choices=("central", "uniform-domain"), default="uniform-domain",
-                        help="Initial cells: central disk (legacy default) or uniform over all valid marine cells.")
+    parser.add_argument("--robot-deployment", choices=("central", "uniform-domain", "peak-annulus"), default=None,
+                        help="Initial cells: central disk, uniform-domain (default), or oracle peak-annulus.")
+    parser.add_argument("--robot-near-count", type=int, default=3,
+                        help="Robots placed in the oracle peak annulus (default: 3).")
+    parser.add_argument("--robot-annulus-inner", type=float, default=50.,
+                        help="Oracle deployment inner radius in grid units (default: 50).")
+    parser.add_argument("--robot-annulus-outer", type=float, default=150.,
+                        help="Oracle deployment outer radius in grid units (default: 150).")
     parser.add_argument("--robot-study-multiseed", action="store_true",
                         help="Run the same robot protocol over multiple seeds, saving aggregate metrics and a figure.")
     parser.add_argument("--robot-study-seeds", type=int, nargs="+", default=None,
@@ -489,9 +495,18 @@ def parse_args() -> argparse.Namespace:
         args.concentration_display_threshold = .01 if args.robot_study else 0.
     if args.robot_gif and not args.robot_study:
         parser.error("--robot-gif requires --robot-study.")
-    if args.robot_deployment != "central" and not args.robot_study:
-        parser.error("--robot-deployment uniform-domain requires a robot study.")
+    if args.robot_deployment is not None and not args.robot_study:
+        parser.error("--robot-deployment requires a robot study.")
+    if args.robot_deployment is None:
+        args.robot_deployment = "uniform-domain"
     if args.robot_study:
+        if args.robot_deployment == "peak-annulus":
+            if args.robot_start_center is not None:
+                parser.error("Peak-annulus is an oracle centered on the true maximum; omit --robot-start-center.")
+            if (not 1 <= args.robot_near_count <= args.n_robots
+                    or not all(map(math.isfinite, (args.robot_annulus_inner, args.robot_annulus_outer)))
+                    or not 0 < args.robot_annulus_inner < args.robot_annulus_outer):
+                parser.error("Require 1 <= robot-near-count <= n-robots and 0 < annulus-inner < annulus-outer.")
         if args.robot_deployment == "uniform-domain" and args.robot_start_center is not None:
             parser.error("Uniform-domain deployment cannot use --robot-start-center; the start radius is unused.")
         if any((args.inspect_netcdf, args.print_dataset, args.plot_concentration_map,
