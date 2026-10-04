@@ -183,7 +183,7 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
     if save_artifacts:
         fields_path = base.with_name(base.name + "_fields.npz")
         np.savez_compressed(fields_path, **saved)
-        paths = geometry_paths + plot_robot_results(grid, walk, results, rows, args, base, coordinate_unit)
+        paths = geometry_paths + plot_robot_results(grid, walk, results, rows, args, base, coordinate_unit, uniform)
         print(f"\nSaved metrics/optimizer CSV and replay fields: {fields_path}")
         for path in paths:
             print(f"Saved: {path}")

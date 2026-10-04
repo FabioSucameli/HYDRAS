@@ -1,5 +1,7 @@
 # Fixed-scale maps and checkpoint-replay animation in the report's Figure 14 palette.
 
+from dataclasses import replace
+
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.colors import BoundaryNorm, ListedColormap
@@ -8,7 +10,7 @@ from matplotlib.ticker import MaxNLocator
 import numpy as np
 from PIL import Image
 
-from pollutant_gp.robot.trajectories import connected_geometry, grid_geometry
+from pollutant_gp.robot.trajectories import connected_geometry, grid_geometry, observations_up_to
 
 
 # Mark privileged starts and the excluded inner disk without implying source knowledge.
@@ -209,7 +211,7 @@ def draw_map(axis, grid, values, vmax, unit, threshold=None):
 
 
 # Keep concentration limits shared across all checkpoints, methods and animation frames.
-def plot_robot_results(grid, walk, results, rows, args, base, unit):
+def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indices):
     paths = []
     threshold = args.concentration_display_threshold
     vmax = max(float(np.max(grid.field[grid.valid_mask])),
@@ -288,9 +290,46 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit):
     plt.close(fig)
     paths.append(path)
 
+    count = max(checkpoints)
+    path = base.with_name(base.name + "_peak_zoom.png")
+    plot_robot_peak(
+        grid, {name: results[(name, count)].mean_field for name in ("Robot", "Uniform budget")},
+        {"Robot": observations_up_to(walk, count), "Uniform budget": uniform_indices[:count]},
+        args.peak_radius, path, unit, f"{title}\nN={count}", threshold, vmax)
+    paths.append(path)
+
     if args.robot_gif:
         paths.extend(plot_robot_gifs(grid, walk, results, args, base, unit))
     return paths
+
+
+# Compare archived or fitted maps around the true peak, counting distinct cells inside the disk.
+def plot_robot_peak(grid, fields, sampled, radius, path, unit, title, threshold, vmax):
+    peak = np.argmax(np.where(grid.valid_mask, grid.field, -np.inf))
+    x = grid.x_grid - grid.x_grid.ravel()[peak]
+    y = grid.y_grid - grid.y_grid.ravel()[peak]
+    local_grid = replace(grid, x_grid=x, y_grid=y)
+    disk = grid.valid_mask & (np.hypot(x, y) <= radius)
+    indices = {name: np.unique(values) for name, values in sampled.items()}
+    counts = {name: int(disk.ravel()[values].sum()) for name, values in indices.items()}
+    fig, axes = plt.subplots(1, 3, figsize=(12.4, 4.8), constrained_layout=True)
+    for axis, name in zip(axes, ("Ground truth", "Robot", "Uniform budget")):
+        layout = "Robot" if name == "Ground truth" else name
+        values = grid.field if name == "Ground truth" else fields[name]
+        mesh = draw_map(axis, local_grid, values, vmax, unit, threshold)
+        cells = indices[layout]
+        axis.scatter(x.ravel()[cells], y.ravel()[cells], s=12, facecolors="none",
+                     edgecolors="#173f5f", linewidths=.6)
+        axis.scatter(0, 0, marker="+", c="black", s=65)
+        axis.add_patch(Circle((0, 0), radius, fill=False, color="#555555", linestyle="--", linewidth=.7))
+        axis.set(xlim=(-radius, radius), ylim=(-radius, radius),
+                 xlabel=f"x offset ({unit})", ylabel=f"y offset ({unit})",
+                 title=f"{name}\n{counts[layout]} distinct {layout} cells in disk")
+    fig.colorbar(mesh, ax=list(axes), shrink=.85, label="Concentration")
+    fig.suptitle(f"{title} | true-peak disk radius {radius:g} {unit}", fontsize=11)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return counts
 
 
 # Replay both GIFs from recorded arrays without saving PNGs or running any GP fits.
