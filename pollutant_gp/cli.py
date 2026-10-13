@@ -480,6 +480,8 @@ def parse_args() -> argparse.Namespace:
                         help="Measurement budgets at which to fit (default: 100 200 ... 800).")
     parser.add_argument("--robot-gif", action="store_true",
                         help="Save GP overview and robots-only GIFs with a two-second end pause; no extra fits.")
+    parser.add_argument("--robot-map-style", choices=("quantitative", "transparent"), default="quantitative",
+                        help="Robot concentration maps/GIFs: original opaque palette (default) or opacity increasing with concentration; visualization only.")
     args = parser.parse_args()
     if args.positivity_study_seeds is not None and not args.positivity_study_multiseed:
         parser.error("--positivity-study-seeds requires --positivity-study-multiseed.")

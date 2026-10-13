@@ -192,10 +192,17 @@ def plot_robot_movement(grid, walk, args, base, unit):
 
 
 # Draw white land, blue sea and the same yellow-to-red concentration map as Figure 14.
-def draw_map(axis, grid, values, vmax, unit, threshold=None):
+def draw_map(axis, grid, values, vmax, unit, threshold=None, map_style="quantitative"):
     axis.pcolormesh(grid.x_grid, grid.y_grid, grid.valid_mask.astype(int), shading="auto",
                     cmap=ListedColormap(["white", "#86cce3"]), vmin=0, vmax=1)
     cmap = plt.get_cmap("YlOrRd").copy()
+    if map_style == "transparent":
+        colors = cmap(np.linspace(0, 1, cmap.N))
+        # Reveal low concentrations smoothly while keeping zero fully transparent.
+        colors[:, 3] = np.linspace(0, 1, cmap.N) ** 0.5
+        cmap = ListedColormap(colors)
+    elif map_style != "quantitative":
+        raise ValueError(f"Unknown robot map style: {map_style}")
     cmap.set_bad((0, 0, 0, 0))
     visible = grid.valid_mask & np.isfinite(values)
     if threshold is not None:
@@ -210,9 +217,18 @@ def draw_map(axis, grid, values, vmax, unit, threshold=None):
     return mesh
 
 
+# Composite the opacity ramp over the same sea colour used in the maps.
+def concentration_colorbar(fig, mesh, axes, map_style, **kwargs):
+    bar = fig.colorbar(mesh, ax=axes, label="Concentration", **kwargs)
+    if map_style == "transparent":
+        bar.ax.set_facecolor("#86cce3")
+    return bar
+
+
 # Keep concentration limits shared across all checkpoints, methods and animation frames.
 def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indices):
     paths = []
+    map_style = getattr(args, "robot_map_style", "quantitative")
     threshold = args.concentration_display_threshold
     vmax = max(float(np.max(grid.field[grid.valid_mask])),
                *(float(np.max(r.mean_field[grid.valid_mask])) for r in results.values()), 1e-12)
@@ -222,7 +238,7 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
              f" | {walk.deployment}")
 
     fig, axis = plt.subplots(figsize=(9, 7), constrained_layout=True)
-    mesh = draw_map(axis, grid, grid.field, vmax, unit, threshold)
+    mesh = draw_map(axis, grid, grid.field, vmax, unit, threshold, map_style)
     if walk.deployment == "peak-annulus":
         draw_oracle_deployment(axis, walk)
     elif walk.center is not None:
@@ -233,7 +249,7 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
     axis.legend(fontsize=9)
     description = "Oracle peak-annulus deployment" if walk.deployment == "peak-annulus" else "Deployment from geometry only"
     axis.set_title(f"{title}\n{description}; display threshold {threshold:g}", fontsize=10)
-    fig.colorbar(mesh, ax=axis, label="Concentration")
+    concentration_colorbar(fig, mesh, axis, map_style)
     path = base.with_name(base.name + "_deployment.png")
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -249,17 +265,19 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
             (grid.field, vmax, threshold, "Ground truth + trajectories"),
             (mobile.mean_field, vmax, threshold, "Robot GP + clip"),
             (reference.mean_field, vmax, threshold, "Uniform budget GP + clip"),
-            (mobile.std_field, stdmax, None, "Robot predictive std (incl. White)"),
+            (mobile.std_field, stdmax, None, "Robot Predictive standard deviation"),
         )):
-            mesh = draw_map(axes[row, col], grid, values, limit, unit, cutoff)
+            mesh = draw_map(axes[row, col], grid, values, limit, unit, cutoff,
+                            map_style if col < 3 else "quantitative")
             axes[row, col].set_title(f"N={count} | {label}", fontsize=10)
             if col == 0:
                 axes[row, col].plot(walk.positions[:step, :, 0], walk.positions[:step, :, 1],
                                     color="#173f5f", alpha=.55, linewidth=.7)
                 axes[row, col].scatter(*walk.positions[step - 1].T, s=16, c="white", edgecolors="#173f5f")
             if col == 2:
-                fig.colorbar(mesh, ax=list(axes[row, :3]), shrink=.78, label="Concentration")
+                concentration_colorbar(fig, mesh, list(axes[row, :3]), map_style, shrink=.78)
             elif col == 3:
+                # Add a colorbar for the standard deviation
                 fig.colorbar(mesh, ax=axes[row, col], shrink=.78, label="Standard deviation")
     fig.suptitle(f"{title}\nFrozen field; shared colour limits; concentration display threshold {threshold:g}", fontsize=13)
     path = base.with_name(base.name + "_checkpoints.png")
@@ -295,7 +313,7 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
     plot_robot_peak(
         grid, {name: results[(name, count)].mean_field for name in ("Robot", "Uniform budget")},
         {"Robot": observations_up_to(walk, count), "Uniform budget": uniform_indices[:count]},
-        args.peak_radius, path, unit, f"{title}\nN={count}", threshold, vmax)
+        args.peak_radius, path, unit, f"{title}\nN={count}", threshold, vmax, map_style)
     paths.append(path)
 
     if args.robot_gif:
@@ -304,7 +322,8 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
 
 
 # Compare archived or fitted maps around the true peak, counting distinct cells inside the disk.
-def plot_robot_peak(grid, fields, sampled, radius, path, unit, title, threshold, vmax):
+def plot_robot_peak(grid, fields, sampled, radius, path, unit, title, threshold, vmax,
+                    map_style="quantitative"):
     peak = np.argmax(np.where(grid.valid_mask, grid.field, -np.inf))
     x = grid.x_grid - grid.x_grid.ravel()[peak]
     y = grid.y_grid - grid.y_grid.ravel()[peak]
@@ -316,7 +335,7 @@ def plot_robot_peak(grid, fields, sampled, radius, path, unit, title, threshold,
     for axis, name in zip(axes, ("Ground truth", "Robot", "Uniform budget")):
         layout = "Robot" if name == "Ground truth" else name
         values = grid.field if name == "Ground truth" else fields[name]
-        mesh = draw_map(axis, local_grid, values, vmax, unit, threshold)
+        mesh = draw_map(axis, local_grid, values, vmax, unit, threshold, map_style)
         cells = indices[layout]
         axis.scatter(x.ravel()[cells], y.ravel()[cells], s=12, facecolors="none",
                      edgecolors="#173f5f", linewidths=.6)
@@ -325,7 +344,7 @@ def plot_robot_peak(grid, fields, sampled, radius, path, unit, title, threshold,
         axis.set(xlim=(-radius, radius), ylim=(-radius, radius),
                  xlabel=f"x offset ({unit})", ylabel=f"y offset ({unit})",
                  title=f"{name}\n{counts[layout]} distinct {layout} cells in disk")
-    fig.colorbar(mesh, ax=list(axes), shrink=.85, label="Concentration")
+    concentration_colorbar(fig, mesh, list(axes), map_style, shrink=.85)
     fig.suptitle(f"{title} | true-peak disk radius {radius:g} {unit}", fontsize=11)
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -335,6 +354,7 @@ def plot_robot_peak(grid, fields, sampled, radius, path, unit, title, threshold,
 # Replay both GIFs from recorded arrays without saving PNGs or running any GP fits.
 def plot_robot_gifs(grid, walk, results, args, base, unit):
     paths = []
+    map_style = getattr(args, "robot_map_style", "quantitative")
     threshold = args.concentration_display_threshold
     vmax = max(float(np.max(grid.field[grid.valid_mask])),
                *(float(np.max(r.mean_field[grid.valid_mask])) for r in results.values()), 1e-12)
@@ -344,14 +364,14 @@ def plot_robot_gifs(grid, walk, results, args, base, unit):
              f" | {walk.deployment}")
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
     empty = np.full_like(grid.field, np.nan)
-    truth_mesh = draw_map(axes[0], grid, grid.field, vmax, unit, threshold)
-    mean_mesh = draw_map(axes[1], grid, empty, vmax, unit, threshold)
+    truth_mesh = draw_map(axes[0], grid, grid.field, vmax, unit, threshold, map_style)
+    mean_mesh = draw_map(axes[1], grid, empty, vmax, unit, threshold, map_style)
     std_mesh = draw_map(axes[2], grid, empty, stdmax, unit)
     tracks = [axes[0].plot([], [], color="#173f5f", linewidth=.8, alpha=.6)[0]
               for _ in range(args.n_robots)]
     dots = axes[0].scatter(*walk.positions[0].T, s=25, c="white", edgecolors="#173f5f")
     axes[0].set_title("Ground truth + robot trajectories", fontsize=11)
-    fig.colorbar(truth_mesh, ax=list(axes[:2]), label="Concentration", shrink=.8)
+    concentration_colorbar(fig, truth_mesh, list(axes[:2]), map_style, shrink=.8)
     fig.colorbar(std_mesh, ax=axes[2], label="Standard deviation", shrink=.8)
     heading = fig.suptitle(title, fontsize=12)
 
@@ -367,7 +387,7 @@ def plot_robot_gifs(grid, walk, results, args, base, unit):
             mean_mesh.set_array(np.ma.masked_where(~grid.valid_mask | (result.mean_field <= threshold), result.mean_field))
             std_mesh.set_array(np.ma.masked_where(~grid.valid_mask, result.std_field))
             axes[1].set_title(f"GP + clip | last fit: N={last}", fontsize=11)
-            axes[2].set_title(f"Predictive std (incl. White) | N={last}", fontsize=10)
+            axes[2].set_title(f"Predictive standard deviation | N={last}", fontsize=10)
         else:
             mean_mesh.set_array(np.ma.masked_invalid(empty))
             std_mesh.set_array(np.ma.masked_invalid(empty))
