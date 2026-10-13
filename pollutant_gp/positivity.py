@@ -94,7 +94,7 @@ def plot_positivity_profiles(profiles, path, title, unit, show):
 
 
 # Reuse matched sensor sets and two prescribed starts, selecting within each target space only.
-def run_positivity_study(args, grid, coordinate_transform, output_path, coordinate_unit):
+def run_positivity_study(args, grid, coordinate_transform, output_path, coordinate_unit, *, lightweight=False):
     verbose = getattr(args, "verbose_optimizer_diagnostics", False)
     if coordinate_transform is None:
         raise ValueError("Current-informed coordinates are required.")
@@ -123,7 +123,7 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
     print(f"Common unobserved cells: global={common.sum()}, local={(common & local).sum()}")
     print("Noiseless oracle control. Two starts per target/layout; selection uses sensor LML only.")
     print("Do NOT compare LML between transforms or layouts. Predictions use latent field variance.")
-    rows, profiles = [], {}
+    rows, profiles, optimizer_rows = [], {}, []
     saved_fields = dict(truth=grid.field, valid=grid.valid_mask, common_unobserved=common, local=local)
     with csv_path.open("w", newline="", encoding="utf-8") as stream:
         writer = None
@@ -133,7 +133,7 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
             saved_fields[f"{layout_key}_sensor_indices"] = indices
             values = grid.field.ravel()[indices].astype(float)
             print(f"\n{sampling}: sensors={len(indices)}, local={local.ravel()[indices].sum()}", flush=True)
-            for transform in ("none", "log1p", "sqrt"):
+            for transform in (("none", "sqrt") if lightweight else ("none", "log1p", "sqrt")):
                 reference = transform_concentrations(grid.field.ravel()[uniform], transform)
                 normalization = (float(reference.mean()), float(reference.std()) or 1.)
                 transformed = transform_concentrations(values, transform)
@@ -158,6 +158,20 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
                             if not run.success:
                                 print(f"WARNING: {name}: status={run.status}; {run.message}", flush=True)
                     candidates.append((name, model, fitted_scaler, diagnostic))
+                    if lightweight:
+                        run = diagnostic.optimizer_runs[diagnostic.selected_run_index]
+                        optimizer_rows.append(dict(
+                            seed=args.random_seed, sampling=sampling, transform=transform,
+                            initialization=name, lml=diagnostic.final_lml,
+                            success=run.success, status=run.status, message=run.message,
+                            kernel=str(model.kernel_),
+                        ))
+                        # Persist candidates even when neither initialization converges.
+                        optimizer_path = base.with_name(base.name + "_optimizer.csv")
+                        with optimizer_path.open("w", newline="", encoding="utf-8") as candidate_stream:
+                            candidate_writer = csv.DictWriter(candidate_stream, fieldnames=list(optimizer_rows[0]))
+                            candidate_writer.writeheader()
+                            candidate_writer.writerows(optimizer_rows)
                 fit_seconds = perf_counter() - started
                 name, model, _, diagnostic = select_converged_fit(candidates)
                 print(f"Selected {transform}: {name}; LML={diagnostic.final_lml:.8g}; "
@@ -176,6 +190,8 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
                     [("Log1p mean", mean, False), ("Log1p mean + clip", mean, True)] if transform == "log1p" else
                     [("Square-root mean", mean, False)])
                 for method, raw, clip in variants:
+                    if lightweight and method not in ("Direct + clip", "Square-root mean"):
+                        continue
                     postprocess_started = perf_counter()
                     prediction = np.maximum(raw, 0.) if clip else raw.copy()
                     postprocess_seconds = perf_counter() - postprocess_started
@@ -201,6 +217,14 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
                                local_full_rmse=peak.local_rmse,
                                fit_seconds=fit_seconds, prediction_seconds=prediction_seconds,
                                postprocess_seconds=postprocess_seconds)
+                    if lightweight:
+                        true_peak = float(np.max(grid.field[grid.valid_mask]))
+                        peak_error = abs(peak.prediction_at_true_peak - true_peak)
+                        row.update(true_peak=true_peak, peak_absolute_error=peak_error,
+                                   peak_relative_error_percent=100 * peak_error / true_peak if true_peak > 0 else float("nan"),
+                                   common_global_count=int(common.sum()),
+                                   common_local_count=int((common & local).sum()),
+                                   local_sensor_count=int(local.ravel()[indices].sum()))
                     if writer is None:
                         writer = csv.DictWriter(stream, fieldnames=list(row))
                         writer.writeheader()
@@ -220,8 +244,10 @@ def run_positivity_study(args, grid, coordinate_transform, output_path, coordina
                         print(f"  Mean prediction on c=0: {metrics['zero_cell_mean_prediction']:.8g}; "
                               f"clipping RMSE reduction: {metrics['clipping_rmse_reduction']:.8g} "
                               f"({metrics['clipping_rmse_reduction_percent']:.5g}%)")
-                    if method in ("Direct + clip", "Log1p mean + clip", "Square-root mean"):
+                    if not lightweight and method in ("Direct + clip", "Log1p mean + clip", "Square-root mean"):
                         profiles[(sampling, method)] = extract_peak_profiles(grid, reconstructed, peak, coordinate_transform)
+    if lightweight:
+        return rows, profiles, common
     fields_path = base.with_name(base.name + "_fields.npz")
     np.savez_compressed(fields_path, **saved_fields)
     figure_path = base.with_name(base.name + "_profiles.png")

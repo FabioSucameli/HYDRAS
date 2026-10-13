@@ -445,6 +445,14 @@ def parse_args() -> argparse.Namespace:
         help="Compare clipping, log1p and square-root targets with two-scale current-informed GPs.",
     )
     parser.add_argument(
+        "--positivity-study-multiseed", action="store_true",
+        help="Compare Direct + clipping and sqrt on matched Uniform/enriched samples at N=800.",
+    )
+    parser.add_argument(
+        "--positivity-study-seeds", type=int, nargs="+", default=None,
+        help="Positivity multiseed sampling seeds (default: 1 through 100).",
+    )
+    parser.add_argument(
         "--verbose-optimizer-diagnostics", action="store_true",
         help="Show full candidate optimizer diagnostics in positivity and robot studies.",
     )
@@ -473,6 +481,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--robot-gif", action="store_true",
                         help="Save GP overview and robots-only GIFs with a two-second end pause; no extra fits.")
     args = parser.parse_args()
+    if args.positivity_study_seeds is not None and not args.positivity_study_multiseed:
+        parser.error("--positivity-study-seeds requires --positivity-study-multiseed.")
+    if args.positivity_study_multiseed:
+        args.positivity_study = True
+        if args.positivity_study_seeds is None:
+            args.positivity_study_seeds = list(range(1, 101))
+        if (len(args.positivity_study_seeds) < 2 or min(args.positivity_study_seeds) < 0
+                or len(set(args.positivity_study_seeds)) != len(args.positivity_study_seeds)):
+            parser.error("Positivity multiseed requires at least two distinct nonnegative seeds.")
+        if args.n_samples not in (None, 800):
+            parser.error("Positivity multiseed is restricted to N=800.")
+        args.n_samples = 800
+        if not args.clip_negative:
+            parser.error("Positivity multiseed compares Direct + clipping against sqrt; omit --allow-negative-predictions.")
     if args.robot_study_seeds is not None and not args.robot_study_multiseed:
         parser.error("--robot-study-seeds requires --robot-study-multiseed.")
     if args.robot_study_multiseed:

@@ -33,6 +33,7 @@ from pollutant_gp.peak import extract_peak_profiles, measure_peak
 from pollutant_gp.peak_sampling import run_peak_sampling_study
 from pollutant_gp.peak_kernel import run_peak_kernel_study
 from pollutant_gp.positivity import run_positivity_study
+from pollutant_gp.positivity_multiseed import run_positivity_multiseed
 from pollutant_gp.robot.study import run_robot_study
 from pollutant_gp.robot.multiseed import run_robot_multiseed
 from pollutant_gp.peak_visualization import (
@@ -574,8 +575,11 @@ def run_workflow(args: argparse.Namespace) -> None:
                 print(f"Current u variable: {args.current_u_variable}")
                 print(f"Current v variable: {args.current_v_variable}")
         if args.positivity_study:
-            print("Target transforms: none, log1p, sqrt (controlled positivity study)")
-            print("Clipping: paired raw/clipped controls; no clipping for square-root mean")
+            if args.positivity_study_multiseed:
+                print("Targets: Direct + clipping and moment-corrected sqrt; N=800, paired seeds")
+            else:
+                print("Target transforms: none, log1p, sqrt (controlled positivity study)")
+                print("Clipping: paired raw/clipped controls; no clipping for square-root mean")
         else:
             print(f"Target transform: {args.target_transform}")
             if args.target_transform != "none":
@@ -656,7 +660,8 @@ def run_workflow(args: argparse.Namespace) -> None:
         figure_path = make_output_figure_path(
             args.output_dir, args.figure_name, args.nc_file, time_index, args.n_samples,
         )
-        study = (run_positivity_study if args.positivity_study else
+        study = (run_positivity_multiseed if args.positivity_study_multiseed else
+                 run_positivity_study if args.positivity_study else
                  run_peak_kernel_study if args.peak_kernel_study else run_peak_sampling_study)
         study(args, grid_data, coordinate_transform, figure_path, coordinate_unit)
         return
