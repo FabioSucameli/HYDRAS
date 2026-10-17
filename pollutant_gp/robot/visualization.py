@@ -1,4 +1,4 @@
-# Fixed-scale maps and checkpoint-replay animation in the report's Figure 14 palette.
+# Visualization utilities for robot deployment and trajectory analysis.
 
 from dataclasses import replace
 
@@ -114,20 +114,44 @@ def plot_robot_proximity(rows, base, unit, thresholds=(10., 20.)):
     return path
 
 
-# Extend the encoded last frame, avoiding extra renders or artificial robot states.
-def save_paused_gif(figure, update, n_steps, path, dpi=90):
+# Quantize original RGB frames once with a shared palette, not separately per frame.
+class SharedPaletteWriter(PillowWriter):
+    def __init__(self, *args, colorbars=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.colorbars = colorbars
+
+    def finish(self):
+        samples = Image.new("RGB", (256, 128 * len(self._frames)))
+        for index, frame in enumerate(self._frames):
+            samples.paste(frame.convert("RGB").resize((256, 128)), (0, index * 128))
+        # Reserve each bar's rendered ramp independently, including its background.
+        colors = []
+        for bar in self.colorbars:
+            rgba = bar.mappable.cmap(np.linspace(0, 1, 96))
+            background = np.asarray(bar.ax.get_facecolor()[:3])
+            rgb = rgba[:, :3] * rgba[:, 3:4] + background * (1 - rgba[:, 3:4])
+            colors.extend(np.rint(rgb * 255).astype(np.uint8).tolist())
+        colors.extend([[v, v, v] for v in np.linspace(0, 255, 32).astype(int)])
+        colors.extend([[134, 204, 227], [23, 63, 95], [253, 174, 97], [178, 24, 43]])
+        remaining = 256 - len(colors)
+        adaptive = samples.quantize(colors=remaining, method=Image.Quantize.MEDIANCUT)
+        colors.extend(np.asarray(adaptive.getpalette()[:remaining * 3]).reshape(-1, 3).tolist())
+        palette = Image.new("P", (1, 1))
+        palette.putpalette(np.asarray(colors, dtype=np.uint8).ravel().tolist())
+        frames = [frame.convert("RGB").quantize(palette=palette, dither=Image.Dither.NONE)
+                  for frame in self._frames]
+        durations = [int(1000 / self.fps)] * len(frames)
+        durations[-1] += 2000
+        frames[0].save(self.outfile, save_all=True, append_images=frames[1:],
+                       optimize=False,
+                       duration=durations, loop=0, disposal=2)
+
+
+# Preserve recorded states and the final pause while keeping colours stable across frames.
+def save_paused_gif(figure, update, n_steps, path, dpi=90, colorbars=()):
     fps = 4
     animation = FuncAnimation(figure, update, frames=n_steps, interval=1000 / fps, repeat=False)
-    animation.save(path, writer=PillowWriter(fps=fps), dpi=dpi)
-    frames, durations = [], []
-    with Image.open(path) as gif:
-        for index in range(gif.n_frames):
-            gif.seek(index)
-            frames.append(gif.copy())
-            durations.append(gif.info.get("duration", 250))
-    durations[-1] += 2000
-    frames[0].save(path, save_all=True, append_images=frames[1:], duration=durations,
-                   loop=0, disposal=2)
+    animation.save(path, writer=SharedPaletteWriter(fps=fps, colorbars=colorbars), dpi=dpi)
 
 
 # Animate stylized twin-hull robots using recorded positions, without concentration or GP maps.
@@ -371,8 +395,8 @@ def plot_robot_gifs(grid, walk, results, args, base, unit):
               for _ in range(args.n_robots)]
     dots = axes[0].scatter(*walk.positions[0].T, s=25, c="white", edgecolors="#173f5f")
     axes[0].set_title("Ground truth + robot trajectories", fontsize=11)
-    concentration_colorbar(fig, truth_mesh, list(axes[:2]), map_style, shrink=.8)
-    fig.colorbar(std_mesh, ax=axes[2], label="Standard deviation", shrink=.8)
+    concentration_bar = concentration_colorbar(fig, truth_mesh, list(axes[:2]), map_style, shrink=.8)
+    std_bar = fig.colorbar(std_mesh, ax=axes[2], label="Standard deviation", shrink=.8)
     heading = fig.suptitle(title, fontsize=12)
 
     def update(step):
@@ -397,7 +421,7 @@ def plot_robot_gifs(grid, walk, results, args, base, unit):
         heading.set_text(f"{title}\nAcquisition {step + 1}/{args.n_steps} | measurements {count} | distinct cells {unique}")
 
     path = base.with_name(base.name + "_motion.gif")
-    save_paused_gif(fig, update, args.n_steps, path)
+    save_paused_gif(fig, update, args.n_steps, path, colorbars=(concentration_bar, std_bar))
     plt.close(fig)
     paths.append(path)
     paths.append(plot_robot_movement(grid, walk, args, base, unit))
