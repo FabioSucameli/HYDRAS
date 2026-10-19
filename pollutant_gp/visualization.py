@@ -50,6 +50,14 @@ def _draw_spatial_panel(
     vmax: float | None,
     sample_coordinates: np.ndarray | None = None,
 ):
+    if cmap == "concentration":
+        axis.pcolormesh(grid_data.x_grid, grid_data.y_grid,
+                       grid_data.valid_mask.astype(int), shading="auto",
+                       cmap=ListedColormap(["white", "#86cce3"]), vmin=0, vmax=1)
+        colors = plt.get_cmap("YlOrRd")(np.linspace(0, 1, 256))
+        colors[:, 3] = np.linspace(0, 1, 256) ** 0.5
+        cmap = ListedColormap(colors)
+        cmap.set_bad((0, 0, 0, 0))
     mesh = axis.pcolormesh(
         grid_data.x_grid,
         grid_data.y_grid,
@@ -212,16 +220,20 @@ def plot_reconstruction(
     axes = axes.ravel()
 
     panels = [
-        ("Ground truth", truth, "viridis", shared_vmin, shared_vmax, True),
-        ("Gaussian Process reconstruction", prediction, "viridis", shared_vmin, shared_vmax, True),
-        ("Predictive uncertainty (standard deviation)", uncertainty, "magma", None, None, False),
+        ("Ground truth", truth, "concentration", shared_vmin, shared_vmax, True),
+        ("Gaussian Process reconstruction", prediction, "concentration", shared_vmin, shared_vmax, True),
+        ("Predictive uncertainty (standard deviation)", uncertainty, "YlOrRd", None, None, False),
         ("Absolute reconstruction error", absolute_error, "inferno", None, None, False),
     ]
 
     for axis, (title, values, cmap, vmin, vmax, draw_samples) in zip(axes, panels):
         samples = sample_coordinates if draw_samples else None
         mesh = _draw_spatial_panel(axis, grid_data, values, title, cmap, vmin, vmax, samples)
-        fig.colorbar(mesh, ax=axis)
+        bar = fig.colorbar(mesh, ax=axis)
+        if cmap == "concentration":
+            bar.ax.set_facecolor("#86cce3")
+        bar.set_label("Concentration" if draw_samples else
+                      "Standard deviation" if title.startswith("Predictive") else "Absolute error")
 
     subtitle = []
     if grid_data.selected_time_label is not None:
@@ -250,11 +262,11 @@ def plot_reconstruction_panels(
         _reconstruction_panel_data(grid_data, reconstruction)
     )
     panels = [
-        ("Ground truth", truth, "viridis", shared_vmin, shared_vmax, True, "ground_truth"),
+        ("Ground truth", truth, "concentration", shared_vmin, shared_vmax, True, "ground_truth"),
         (
             "Gaussian Process reconstruction",
             prediction,
-            "viridis",
+            "concentration",
             shared_vmin,
             shared_vmax,
             True,
@@ -263,7 +275,7 @@ def plot_reconstruction_panels(
         (
             "Predictive uncertainty (standard deviation)",
             uncertainty,
-            "magma",
+            "YlOrRd",
             None,
             None,
             False,
@@ -286,7 +298,11 @@ def plot_reconstruction_panels(
         fig, axis = plt.subplots(figsize=(8, 6), constrained_layout=True)
         samples = sample_coordinates if draw_samples else None
         mesh = _draw_spatial_panel(axis, grid_data, values, title, cmap, vmin, vmax, samples)
-        fig.colorbar(mesh, ax=axis)
+        bar = fig.colorbar(mesh, ax=axis)
+        if cmap == "concentration":
+            bar.ax.set_facecolor("#86cce3")
+        bar.set_label("Concentration" if draw_samples else
+                      "Standard deviation" if title.startswith("Predictive") else "Absolute error")
         fig.savefig(panel_path, dpi=220)
 
         if show:
