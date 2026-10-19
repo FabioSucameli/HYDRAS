@@ -5,11 +5,30 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 from matplotlib.patches import Circle
 import numpy as np
 
 from pollutant_gp.peak import PeakDiagnostics, PeakProfile
 from pollutant_gp.types import GridData, ReconstructionResult
+
+
+def _concentration_map(axis, x, y, valid_mask, values, vmin, vmax):
+    """Match the transparent robot maps without changing the plotted data."""
+    axis.pcolormesh(x, y, valid_mask.astype(int), shading="auto",
+                    cmap=ListedColormap(["white", "#86cce3"]), vmin=0, vmax=1)
+    colors = plt.get_cmap("YlOrRd")(np.linspace(0, 1, 256))
+    colors[:, 3] = np.linspace(0, 1, 256) ** 0.5
+    cmap = ListedColormap(colors)
+    cmap.set_bad((0, 0, 0, 0))
+    return axis.pcolormesh(x, y, np.where(valid_mask, values, np.nan),
+                           shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+
+
+def _concentration_colorbar(figure, mesh, axes, **kwargs):
+    bar = figure.colorbar(mesh, ax=axes, label="Concentration", **kwargs)
+    bar.ax.set_facecolor("#86cce3")
+    return bar
 
 
 # Print quantities that distinguish a missing observation from a smoothed observed peak.
@@ -72,7 +91,7 @@ def plot_peak_diagnostics(
     vmax = data_max if colour_max is None else colour_max
     figure, axes = plt.subplots(1, 2, figsize=(12, 6.6), constrained_layout=True)
     for axis, values, label in zip(axes, (truth, prediction), ("Ground truth", "GP reconstruction")):
-        mesh = axis.pcolormesh(x, y, values, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+        mesh = _concentration_map(axis, x, y, grid_data.valid_mask, values, vmin, vmax)
         axis.add_patch(Circle((0, 0), radius, fill=False, edgecolor="0.6", linestyle="--"))
         axis.scatter(*sensor_xy[inside_zoom].T, s=36, facecolors="none", edgecolors="white",
                      linewidths=1.2, label="Sensors", zorder=4)
@@ -88,7 +107,7 @@ def plot_peak_diagnostics(
         axis.set_aspect("equal")
     handles, labels = axes[0].get_legend_handles_labels()
     figure.legend(handles, labels, loc="outside lower center", ncols=len(labels))
-    figure.colorbar(mesh, ax=axes, label="Concentration", shrink=0.85,
+    _concentration_colorbar(figure, mesh, axes, shrink=0.85,
                     extend="max" if data_max > vmax else "neither")
     figure.suptitle(title + f"\nPeak-centred zoom; diagnostic disk radius = {radius:g} {coordinate_unit}", fontsize=13)
     zoom_path = output_base.with_name(output_base.name + "_zoom.png")
@@ -139,8 +158,7 @@ def plot_peak_kernel_comparison(grid, runs, output_base, title, coordinate_unit,
         pair = runs[row * 2:row * 2 + 2]
         for column, axis in enumerate(axes[row]):
             field = grid.field if column == 0 else pair[column - 1].reconstruction.mean_field
-            mesh = axis.pcolormesh(x, y, np.where(grid.valid_mask, field, np.nan),
-                                  shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+            mesh = _concentration_map(axis, x, y, grid.valid_mask, field, vmin, vmax)
             indices = pair[0].indices
             inside = (np.abs(x.ravel()[indices]) <= radius) & (np.abs(y.ravel()[indices]) <= radius)
             axis.scatter(x.ravel()[indices][inside], y.ravel()[indices][inside], s=10,
@@ -155,7 +173,7 @@ def plot_peak_kernel_comparison(grid, runs, output_base, title, coordinate_unit,
                      xlim=(-radius, radius), ylim=(-radius, radius),
                      xlabel=f"x offset ({coordinate_unit})", ylabel=f"y offset ({coordinate_unit})")
             axis.set_aspect("equal")
-    figure.colorbar(mesh, ax=list(axes.flat), label="Concentration", shrink=.8,
+    _concentration_colorbar(figure, mesh, list(axes.flat), shrink=.8,
                     extend="max" if data_max > vmax else "neither")
     figure.suptitle(title + "\nWhite circles: sensors; star: true maximum; cross: global predicted maximum",
                     fontsize=12)
@@ -225,8 +243,7 @@ def plot_peak_sampling_comparison(
     vmax = max(data_max, vmin + 1e-12) if colour_max is None else colour_max
     figure, axes = plt.subplots(2, 2, figsize=(12, 11), constrained_layout=True)
     for i, (axis, field) in enumerate(zip(axes.flat, fields)):
-        mesh = axis.pcolormesh(x, y, np.where(grid.valid_mask, field, np.nan),
-                               shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+        mesh = _concentration_map(axis, x, y, grid.valid_mask, field, vmin, vmax)
         axis.add_patch(Circle((0, 0), radius, fill=False, edgecolor="0.6", linestyle="--"))
         axis.scatter(0, 0, marker="*", s=120, c="#E69F00", edgecolors="black",
                      label="True maximum", zorder=6)
@@ -238,7 +255,7 @@ def plot_peak_sampling_comparison(
             added = ~np.isin(run.indices, runs[0].indices)
             for selection, colour, sensor_label in (
                 (inside & ~added, "white", "Retained sensors"),
-                (inside & added, "#00BFC4", "Added sensors"),
+                (inside & added, "#23465d", "Added sensors"),
             ):
                 axis.scatter(*xy[selection].T, s=16, facecolors="none", edgecolors=colour,
                              linewidths=0.8, label=sensor_label, zorder=4)
@@ -254,7 +271,7 @@ def plot_peak_sampling_comparison(
         axis.set_aspect("equal")
     handles, labels = axes.flat[-1].get_legend_handles_labels()
     figure.legend(handles, labels, loc="outside lower center", ncols=len(labels))
-    figure.colorbar(mesh, ax=list(axes.flat), label="Concentration", shrink=0.85,
+    _concentration_colorbar(figure, mesh, list(axes.flat), shrink=0.85,
                     extend="max" if data_max > vmax else "neither")
     figure.suptitle(title + f"\nDiagnostic disk radius = {radius:g} {coordinate_unit}", fontsize=12)
     zoom_path = output_base.with_name(output_base.name + "_zoom.png")
