@@ -2,7 +2,7 @@
 
 **Reconstruction and localisation of marine pollutant sources using Gaussian Processes and underwater robots**
 
-This repository contains the Python code, the working report and the thesis sources for a Master's
+This repository contains the Python implementation and selected experimental results for a Master's
 project on probabilistic reconstruction of marine pollutant concentration fields. The long-term goal
 is to estimate the spatial distribution of a pollutant from sparse measurements collected by
 underwater robots, and to use the reconstructed field to support informative exploration and source
@@ -20,6 +20,10 @@ localisation.
 - [Current Status](#current-status)
 - [Key Result](#key-result)
 - [Results Snapshot](#results-snapshot)
+- [Recovering the Peak](#recovering-the-peak)
+- [Positive Predictions](#positive-predictions)
+- [From Sensors to Mobile Robots](#from-sensors-to-mobile-robots)
+- [Robot Animations: Seed 48](#robot-animations-seed-48)
 - [Repository Structure](#repository-structure)
 - [Installation](#installation)
 - [Data](#data)
@@ -41,12 +45,13 @@ This project studies how **Gaussian Processes (GPs)** can be used to:
 2. quantify predictive uncertainty over the marine domain;
 3. evaluate how many measurements are needed for reliable reconstruction;
 4. encode physical knowledge about pollutant transport into the covariance function;
-5. guide robot motion and localise the pollutant source.
+5. support future informative robot motion and pollutant source localisation.
 
 Gaussian Processes are useful here because they return both a mean prediction and a predictive
 uncertainty. That makes them suitable not only for interpolation, but also for informative path
-planning, since the predictive variance depends only on *where* measurements were taken and not on
-*what* they returned — so a candidate measurement can be scored before it is made.
+planning. With fixed kernel hyperparameters and observation-noise assumptions, posterior covariance
+depends on measurement locations, not their values. Refitting hyperparameters or target scaling can
+change that uncertainty. Informative planning and source localisation remain future work.
 
 ---
 
@@ -79,7 +84,8 @@ flowchart LR
     K --> P["Predict, then report the maps<br/>in the original coordinates"]
 ```
 
-A key methodological distinction is that the orientation angle theta is derived from independently measured physical forcing, making the orientation part of the model  
+The orientation angle theta comes from separate wind or current data, not from the concentration
+ground truth. This is a transport-oriented covariance, not a PDE-constrained GP.
 
 ---
 
@@ -101,8 +107,8 @@ flowchart TD
 
 
 
-The package structure is intentionally modular so that trajectory sampling, informative planning and
-source localisation can be added without rewriting the Phase 1 baseline.
+Static reconstruction and random-walk trajectory sampling are implemented. Informative planning
+and source localisation are the next stages, not capabilities demonstrated by the current results.
 
 ---
 
@@ -121,7 +127,8 @@ Implemented:
 - single-seed and multi-seed sample-size studies;
 - **multi-seed comparison of four covariance structures** — isotropic, axis-aligned anisotropic,
   wind-informed and current-informed — on identical shared samples;
-- positivity diagnostics before clipping, and an optional `log1p` target transform;
+- positivity diagnostics, `log1p` and `sqrt` transforms with moment-corrected predictions,
+  and a paired Direct/clipping versus sqrt control over 20 seeds;
 - length-scale bound diagnostics, reporting how often an optimised length scale reaches its bound;
 - **peak diagnostics** at a fixed sensor budget: prediction at the true maximum, localisation error
   and local RMSE inside a peak-centred disk, with a zoom and two directional profiles;
@@ -131,13 +138,18 @@ Implemented:
   marginal likelihood on the sensors alone;
 - controlled optimiser diagnostics: initialisation study, nested restart study, and lower-bound,
   upper-bound and local sensitivity studies for the length scales;
+- **mobile sampling on a frozen field:** 20 robots, 40 acquisitions and three initial deployments,
+  studied over 100 seeds, with checkpoint maps and GIFs;
+- matched uniform references, a cross-deployment Pure Uniform comparison, and geometric
+  proximity and step-length diagnostics;
 - NetCDF inspection utilities.
 
 ---
 
 ## Key Result
 
-Anisotropy alone buys nothing; anisotropy **with the right orientation** buys a great deal.
+In the tested scenario, a **transport-oriented covariance** improves reconstruction over the
+isotropic and axis-aligned references.
 
 Averaged over five random seeds on the `CL02_V1_SRC131` scenario at time index 729, with identical
 samples shared by all four models and a length-scale lower bound of 0.075:
@@ -150,11 +162,17 @@ samples shared by all four models and a length-scale lower bound of 0.075:
 | 1200 | 0.1739 | 0.1739 | **0.1240** | 0.1243 |
 | 1600 | 0.1635 | 0.1635 | 0.1271 | **0.1248** |
 
-Mean RMSE on the valid marine cells; lower is better. The axis-aligned anisotropic model is
-indistinguishable from the isotropic one, because an ellipse constrained to the grid axes cannot
-follow a plume that runs north-west to south-east. The two physically informed models — whose
-transport directions are estimated independently, from wind and from current, and agree to within
-about two degrees — reduce the error by roughly a quarter.
+Mean RMSE on the valid marine cells; lower is better. At 1200 and 1600 sensors, both axis-aligned
+length scales reach the imposed lower bound, making its RBF component isotropic. The overlap is
+therefore a constrained-fit result, not proof that axis-aligned anisotropy never helps.
+Wind- and current-informed models improve the mean RMSE in this experiment; this is not a universal
+ranking of physical forcings or a universal recommendation for the bound 0.075.
+
+Controlled optimiser studies also found strong dependence on initialisation. At N=800, seed 123,
+short-scale initialisation reached LML about -865.518 versus -977.843 from Default. Neither of two
+sequences of seven random restarts recovered that higher-LML basin. It is the best-known solution
+within those controlled tests, not a proven global optimum. LML is fitted on sensors; full-grid
+RMSE is a separate simulation diagnostic and is never used to choose the fitted candidate.
 
 ---
 
@@ -164,29 +182,32 @@ A small number of curated figures. Diagnostic panels are discussed in the report
 
 ### Valid Marine Domain
 
-![Valid marine domain](outputs/valid_domain_map_t705.png)
+![Valid marine domain](outputs/valid_domain.png)
 
 The valid domain is extracted from finite concentration values. Sampling, reconstruction and metric
 computation are all restricted to these cells.
 
 ### Stationary Reconstruction Example
 
-![Phase 1 reconstruction overview with 800 samples](outputs/github_t2820_n800_overview.png)
+![CL02 stationary reconstruction with 800 sensors](outputs/static_reconstruction.png)
 
-Reconstruction at time index `2820` with 800 synthetic sensors. The four panels show the ground
-truth, the GP mean, the predictive standard deviation and the absolute error. This run reaches
-`RMSE = 1.89` and `R2 = 0.60` on valid marine cells.
+Single-run reconstruction of `CL02_V1_SRC131` at time index `729` with 800 synthetic sensors
+and an axis-aligned anisotropic RBF kernel. The four panels show ground truth, the GP mean,
+predictive standard deviation and absolute error. The thin filament motivates the transport-oriented
+models and local sampling studies below.
 
 ### Multi-Seed Sample-Size Study
 
-![Multi-seed RMSE study](outputs/case_2820_multiseed_rmse.png)
+![CL02 multi-seed RMSE study with 200 to 1600 sensors](outputs/sample_size_rmse.png)
 
-The mean trend improves with the number of samples, while the spread across seeds shows that
-*where* the sensors fall matters as much as how many there are — especially for localised plumes.
+On the same `CL02_V1_SRC131` snapshot, the multi-seed study compares 200, 400, 800, 1200 and
+1600 sensors. Unlike the single reconstruction above, this figure summarises variability across
+sampling seeds. Mean RMSE decreases as coverage increases, with diminishing gains; the spread
+shows that reconstruction also depends on where the sensors fall relative to the filament.
 
 ### Kernel Comparison
 
-![Kernel comparison across seeds](outputs/cl02_wind_current_kernel_comparison_lb0075.png)
+![Kernel comparison across seeds](outputs/kernel_comparison.png)
 
 The four covariance structures on shared samples. The isotropic and axis-aligned curves overlap; the
 two physically informed curves separate clearly from them.
@@ -203,7 +224,7 @@ and a flexible current-informed GP can improve both peak recovery and field reco
 
 ### Improving Local Coverage
 
-![Oracle sampling control at seed 123](outputs/cl02_seed123_sampling_zoom.png)
+![Oracle sampling control at seed 123](outputs/peak_sampling.png)
 
 `--peak-sampling-study` compares uniform, peak-observed and locally enriched layouts at a
 **fixed budget of 800 sensors**. Moving 160 sensors into the disk reduces local RMSE on common
@@ -227,7 +248,7 @@ The two-scale model recovers **96.5% of the true peak** (7.647) for seed 123 and
 seed 7. At the same bound of 0.02, it also reduces global RMSE on common unobserved cells by
 approximately **29% and 34%**, respectively, compared with the single RBF.
 
-![Single and two-scale kernels at lower bound 0.02](outputs/cl02_peak_kernel_seed123_lb002_zoom.png)
+![Single and two-scale kernels at lower bound 0.02](outputs/peak_two_scale.png)
 
 Ground truth, single RBF and two RBFs at lower bound 0.02. Rows show uniform and enriched sampling,
 with a shared colour scale.
@@ -239,6 +260,107 @@ They demonstrate improved reconstruction, not autonomous source localisation.
 
 ---
 
+
+## Positive Predictions
+
+Clipping, moment-corrected `log1p` and moment-corrected square-root predictions were compared
+on matched observations. The follow-up control isolates **Direct + clipping (D)** versus **sqrt (Q)**
+over seeds 1-20, N=800, with the same two-scale kernel and bounds `[0.01, 100]`.
+Each method selects its highest-LML converged fit from Broad/short and Compact/short initialisations.
+
+| Sampling | D global RMSE | Q global RMSE | Seeds where Q wins |
+|---|---:|---:|---:|
+| Uniform | 0.1048 +/- 0.0173 | **0.0899 +/- 0.0131** | 19/20 |
+| Locally enriched (oracle) | 0.1413 +/- 0.0224 | **0.1038 +/- 0.0108** | 20/20 |
+
+Mean +/- sample standard deviation, on common unobserved cells within each seed.
+Q improves global reconstruction, but improves the absolute peak-height error in only 8/20 Uniform
+and 12/20 enriched cases. Separate diagnostics for `c=0`, `0<c<=1`, `c>1` and the local 150 m disk
+prevent a good score on the clean background from hiding errors in the plume.
+These bounds differ from the robot experiments below; this is not a direct ranking across studies.
+
+## Robots
+
+**From Sensors to Mobile Robots:**
+the field remains frozen at CL02 time index 729. Twenty point-like robots collect 40 measurements
+each (initial positions plus 39 movement attempts), giving **800 acquisitions, not necessarily 800
+distinct cells**. The random walk uses a nominal 60 m step and valid-grid geometry. Repeated noiseless
+observations are fitted once per distinct cell; no extra measurements are added to replace revisits.
+
+Three deployments have equal standing in the comparison:
+
+| Deployment | Initial positions | Prior information |
+|---|---|---|
+| Central | 20 robots in a 150 m disk around a geometry-derived centre | Marine mask only |
+| Uniform-domain | 20 distinct random cells across the valid domain | Marine mask only |
+| Peak-annulus | 3 robots in a 30-150 m annulus around the true maximum; 17 elsewhere | Oracle peak location |
+
+The annulus excludes the peak cell at deployment. It represents a favourable initial condition:
+as you can see at the start of the GIF below, three robots are placed near the true peak,
+inside the 30-150 m annulus, but not on the peak cell itself. The animation then shows their
+random walks, not a policy that has discovered or actively follows the source.
+
+![Seed 48: initial annulus deployment and subsequent robot motion](outputs/robot_annulus_seed48_movement.gif)
+
+The central experiment models a compact release without
+knowledge of the plume. 
+
+All use two current-oriented RBF components, bounds `[0.02, 100]`, direct targets and clipping.
+For every seed, checkpoint and layout, Broad/short and Compact/short are alternative initialisations
+of the same model; the highest sensor-LML converged fit is selected.
+
+### What the 100-seed comparison shows
+
+Within each deployment, **Uniform budget** matches acquisition count and **Uniform distinct** matches
+the number of distinct robot cells. Both inherit the robot starts; nested samples and a fixed common
+unobserved evaluation mask make checkpoints comparable within a seed.
+
+For the direct comparison below, a separate **Pure Uniform** reference inherits no robot starts.
+All four strategies are evaluated on exactly the same spatial domains: the full valid grid and the
+full 150 m peak disk, **including observed cells**. These scores must not be confused with the earlier
+common-unobserved errors.
+
+| At 800 acquisitions, 100 seeds | Central | Uniform-domain | Peak-annulus (oracle) | Pure Uniform |
+|---|---:|---:|---:|---:|
+| Global RMSE | 0.2409 +/- 0.0135 | 0.1968 +/- 0.0586 | 0.1825 +/- 0.0270 | **0.1248 +/- 0.0224** |
+| Local RMSE | 0.9185 +/- 0.0113 | 0.8075 +/- 0.2989 | **0.5635 +/- 0.1506** | 0.7172 +/- 0.1685 |
+| Distinct sampled cells (mean) | 700.9 | 713.4 | 712.1 | 800.0 |
+| Distinct sampled cells in peak disk (mean) | 0.00 | 15.87 | 53.02 | 14.17 |
+| Prediction at true peak (mean; truth = 7.647) | 0.268 | 1.732 | 3.409 | 1.704 |
+
+![Global RMSE across three deployments and Pure Uniform](outputs/deployment_global.png)
+
+![Local RMSE across three deployments and Pure Uniform](outputs/deployment_local.png)
+
+Bars show one sample standard deviation across seeds. Pure Uniform gives
+the best mean global coverage, but is not a feasible motion policy for the same robots without travel
+constraints. The annulus gives the best mean local reconstruction, using privileged initial information.
+The central release misses the diagnostic disk in these runs. These results motivate **informative
+trajectories that balance coverage and plume detail**, rather than claiming that random walks solve
+source localisation. 
+
+## Robot Animations
+
+The following recorded runs illustrate the reconstruction of the filament at seed 48. 
+The 100-seed results above provide the statistical context.
+
+Each GIF shows ground truth with accumulated trajectories and robot positions, the latest GP mean,
+and predictive standard deviation (including WhiteKernel). The GP is updated at checkpoints
+100, 200, ..., 800; between fits, the previous reconstruction stays visible. 
+
+### Central release
+
+![Seed 48: central deployment, trajectories and GP reconstruction](outputs/robot_central_seed48.gif)
+
+### Uniform-domain release
+
+![Seed 48: uniform-domain deployment, trajectories and GP reconstruction](outputs/robot_domain_seed48.gif)
+
+### Favourable annulus release (oracle)
+
+![Seed 48: three robots near the peak, trajectories and GP reconstruction](outputs/robot_annulus_seed48.gif)
+
+---
 
 ## Repository Structure
 
@@ -258,18 +380,27 @@ pollutant_gp/
   peak_sampling.py          Oracle sampling controls at a fixed sensor budget
   peak_kernel.py            Single versus two-scale kernel comparison
   peak_visualization.py     Peak zooms and directional profiles
+  positivity.py             Matched target-transform comparison
+  positivity_multiseed.py    Paired Direct/clipping versus sqrt study
+  robot/
+    trajectories.py         Deployments, random walks and domain geometry
+    study.py                Single-seed fitting, baselines and saved maps
+    visualization.py        Robot maps, checkpoint panels and GIFs
+    multiseed.py            Per-seed metrics and aggregate statistics
+    deployment_comparison.py Archived Robot fits versus Pure Uniform
+    proximity.py            Geometric inter-robot proximity diagnostics
+    step_sensitivity.py     Controlled random-walk step-length study
   types.py                  Shared dataclasses
   style.py                  Shared palette and figure styling
   visualization.py          Plot generation
   workflow.py               Pipeline orchestration and experimental studies
-outputs/                    Selected figures
+outputs/                    Selected figures 
 
 requirements.txt
 README.md
 ```
 
-Local environments, Python caches, run-time outputs, LaTeX build artefacts and NetCDF datasets are
-not tracked by Git.
+
 
 ---
 
@@ -314,7 +445,7 @@ All commands are run from the repository root.
 ### Inspect the data
 
 ```bash
-python main.py --print-dataset --time-index 705
+python main.py --nc-file CMEMS_S1_01_conc_grid_10m.nc --print-dataset --time-index 705
 python main.py --inspect-netcdf --netcdf-dir .
 ```
 
@@ -356,7 +487,7 @@ python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 \
 ### Sample-size studies
 
 ```bash
-python main.py --time-index 2820 --sample-size-study-multiseed \
+python main.py --nc-file CMEMS_S1_01_conc_grid_10m.nc --time-index 2820 --sample-size-study-multiseed \
   --sample-size-study-counts 10 25 50 100 200 400 800 \
   --sample-size-study-seeds 7 42 123 256 512
 ```
@@ -364,8 +495,9 @@ python main.py --time-index 2820 --sample-size-study-multiseed \
 ### Positivity of the predictions
 
 ```bash
-python main.py --time-index 729 --target-transform log1p
-python main.py --time-index 729 --allow-negative-predictions
+python main.py --time-index 729 --n-samples 800 --current-informed --target-transform none --clip-negative
+python main.py --time-index 729 --n-samples 800 --current-informed --target-transform log1p
+python main.py --time-index 729 --n-samples 800 --current-informed --target-transform sqrt
 ```
 
 
@@ -400,11 +532,63 @@ python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 \
 
 ---
 
+### Reproduce the positivity control (20 seeds)
+
+PowerShell; this launches fits, not just plotting:
+
+```powershell
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --n-samples 800 --current-informed --current-average-hours 12 --positivity-study-multiseed --positivity-study-seeds (1..20) --length-scale-lower-bound 0.01 --length-scale-upper-bound 100 --n-restarts 0 --peak-radius 150 --peak-local-replacements 160 --peak-coordinate-unit m --prediction-batch-size 2000 --output-dir outputs/positivity_20seeds
+```
+
+### Reproduce the seed 48 animations
+
+Each command fits the three sampling layouts at all checkpoints and saves both GIFs.
+The annulus inner radius and display threshold are explicit to match the illustrated runs.
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study --robot-deployment central --robot-start-radius 150 --current-informed --current-average-hours 12 --random-seed 48 --n-robots 20 --n-steps 40 --robot-step 60 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --n-restarts 0 --target-transform none --clip-negative --robot-map-style transparent --concentration-display-threshold 0 --robot-gif --peak-coordinate-unit m --output-dir outputs
+```
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study --robot-deployment uniform-domain --current-informed --current-average-hours 12 --random-seed 48 --n-robots 20 --n-steps 40 --robot-step 60 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --n-restarts 0 --target-transform none --clip-negative --robot-map-style transparent --concentration-display-threshold 0 --robot-gif --peak-coordinate-unit m --output-dir outputs
+```
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study --robot-deployment peak-annulus --robot-near-count 3 --robot-annulus-inner 30 --robot-annulus-outer 150 --current-informed --current-average-hours 12 --random-seed 48 --n-robots 20 --n-steps 40 --robot-step 60 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --n-restarts 0 --target-transform none --clip-negative --robot-map-style transparent --concentration-display-threshold 0 --robot-gif --peak-coordinate-unit m --output-dir outputs
+```
+
+### Robot studies over 100 seeds
+
+These are substantial GP runs. Omitting `--robot-study-seeds` selects seeds 1-100;
+`--random-seed 48` alone does not select the multi-seed sequence. No GIFs are generated here.
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study-multiseed --robot-deployment central --robot-start-radius 150 --current-informed --current-average-hours 12 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --peak-coordinate-unit m --figure-name robot_multiseed.png --output-dir outputs/robot_multiseed_100seeds
+```
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study-multiseed --robot-deployment uniform-domain --current-informed --current-average-hours 12 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --peak-coordinate-unit m --figure-name robot_domain_multiseed.png --output-dir outputs/robot_domain_100seeds
+```
+
+```bash
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study-multiseed --robot-deployment peak-annulus --robot-near-count 3 --robot-annulus-inner 30 --robot-annulus-outer 150 --current-informed --current-average-hours 12 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --peak-coordinate-unit m --figure-name robot_annulus_multiseed.png --output-dir outputs/robot_peak_100seeds
+```
+
+After those archives exist, reproduce the comparison on common full domains:
+
+```bash
+python -m pollutant_gp.robot.deployment_comparison --output-dir outputs/robot_deployment_comparison_local
+```
+
+This reuses archived Robot hyperparameters without reoptimising them and predicts locally to
+complete the common-domain scores; Pure Uniform is fitted separately. The default input paths
+match the three commands above. Add `--resume` to this comparison command to skip completed seeds.
+
 ## Command-Line Arguments
 
 | Argument | Default | Description |
 |---|---:|---|
-| `--nc-file` | `CMEMS_S1_01_conc_grid_10m.nc` | NetCDF file used for reconstruction |
+| `--nc-file` | `CL02_V1_SRC131_Conc_10mGrid.nc` | NetCDF file used for reconstruction |
 | `--time-index` | auto | Time index to reconstruct or inspect |
 | `--n-samples` | `200` | Number of synthetic sensors |
 | `--noise-std` | `0.0` | Standard deviation of the simulated sensor noise |
@@ -417,9 +601,9 @@ python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 \
 | `--wind-average-hours` | `12.0` | Averaging window preceding the snapshot |
 | `--current-file` | `CL02_V1_SRC000_U_V_10mGrid.nc` | Current U/V dataset |
 | `--current-average-hours` | `12.0` | Averaging window for the mean current |
-| `--length-scale-lower-bound` | `0.05` | Lower bound in standardised coordinates; acts as regularisation |
+| `--length-scale-lower-bound` | `0.05`; robot studies: `0.02` | Lower bound in standardised coordinates |
 | `--length-scale-upper-bound` | `100.0` | Upper bound in standardised coordinates |
-| `--target-transform` | `none` | `none` or `log1p` |
+| `--target-transform` | `none` | `none`, `log1p`, `sqrt`; transformed predictions are moment-corrected |
 | `--n-restarts` | `0` | Additional optimiser restarts |
 | `--clip-negative` | on | Clip negative mean predictions to zero |
 | `--allow-negative-predictions` | off | Keep negative predictions instead of clipping |
@@ -432,6 +616,16 @@ python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 \
 | `--peak-diagnostics` | off | Peak metrics, zoom and directional profiles after one reconstruction |
 | `--peak-sampling-study` | off | Uniform, peak-observed and locally enriched oracle layouts at a fixed budget |
 | `--peak-kernel-study` | off | Single against two-scale current-informed kernel on the same sensors |
+| `--positivity-study` | off | Controlled comparison of target transforms |
+| `--positivity-study-multiseed` | off | Paired D/Q study at N=800; 100 seeds by default |
+| `--robot-study` | off | Single-seed robot experiment |
+| `--robot-study-multiseed` | off | Robot study over seeds 1-100 unless specified |
+| `--robot-deployment` | `uniform-domain` | `central`, `uniform-domain`, `peak-annulus` |
+| `--robot-annulus-inner` | `50` | Set explicitly to `30` for the reported annulus experiment |
+| `--robot-near-count` | `3` | Robots deployed in the oracle annulus |
+| `--robot-step` | `60` | Nominal step in coordinate units (metres for CL02) |
+| `--robot-gif` | off | Single-seed reconstruction and robot-motion animations |
+| `--robot-map-style` | `quantitative` | Use `transparent` for the illustrated concentration maps |
 | `--peak-radius` | `150.0` | Radius of the peak-centred diagnostic disk, in grid units |
 | `--peak-local-replacements` | `160` | Outside sensors moved into the disk by the enriched control |
 | `--peak-vmax` | auto | Common colour maximum for peak zooms, so runs stay comparable |
@@ -479,5 +673,9 @@ of sensors, with one faint line per seed and the mean in bold in the multi-seed 
 `--kernel-comparison-study` plots the same metrics with one curve per covariance structure.
 
 Results are saved locally in the `outputs/` directory.
+Robot single-seed runs also save checkpoint maps, local zooms, CSV diagnostics and NPZ fields;
+`--robot-gif` adds reconstruction and movement GIFs. Multi-seed runs save per-seed metrics and
+aggregate summaries/curves, without generating all per-seed GIFs. The curated README assets are
+copies of existing results.
 
 
