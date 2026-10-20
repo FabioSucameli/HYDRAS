@@ -356,7 +356,7 @@ and predictive standard deviation (including WhiteKernel). The GP is updated at 
 
 ![Seed 48: uniform-domain deployment, trajectories and GP reconstruction](outputs/robot_domain_seed48.gif)
 
-### Favourable annulus release (oracle)
+### Corona release
 
 ![Seed 48: three robots near the peak, trajectories and GP reconstruction](outputs/robot_annulus_seed48.gif)
 
