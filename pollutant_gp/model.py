@@ -188,6 +188,44 @@ def latent_variance(observation_std, white_level, target_scale):
     return np.maximum(variance, 0.)
 
 
+def integrated_variance_reduction(model, evaluation, candidates, batch_size=2000):
+    """One-observation reduction of mean latent variance, in restored target units.
+
+    Inputs are already rotated/standardized. The fitted kernel must be signal +
+    WhiteKernel, with scalar alpha and sklearn target normalization. White noise
+    and alpha enter only the hypothetical observation denominator, not C(Z, A).
+    """
+    from scipy.linalg import cho_solve, solve_triangular
+
+    if batch_size < 1 or len(evaluation) == 0:
+        raise ValueError("A nonempty evaluation grid and positive batch size are required.")
+    if not hasattr(model.kernel_, "k2") or not isinstance(model.kernel_.k2, WhiteKernel):
+        raise ValueError("IPP requires a signal + WhiteKernel fitted kernel.")
+    if np.ndim(model.alpha) != 0 or np.asarray(model._y_train_std).size != 1:
+        raise ValueError("IPP requires scalar alpha and a scalar target.")
+    if len(candidates) == 0:
+        return np.empty(0)
+    signal = model.kernel_.k1
+    cross = signal(model.X_train_, candidates)
+    projected = solve_triangular(model.L_, cross, lower=True, check_finite=False)
+    latent = signal.diag(candidates) - np.sum(projected**2, axis=0)
+    tolerance = 1e-10 * max(1., float(np.max(signal.diag(candidates))))
+    if np.any(latent < -tolerance):
+        raise ValueError("Negative candidate latent variance beyond roundoff.")
+    denominator = np.maximum(latent, 0.) + model.kernel_.k2.noise_level + float(model.alpha)
+    weights = cho_solve((model.L_, True), cross, check_finite=False)
+    squared = np.zeros(len(candidates))
+    for start in range(0, len(evaluation), batch_size):
+        points = evaluation[start:start + batch_size]
+        posterior = signal(points, candidates) - signal(points, model.X_train_) @ weights
+        squared += np.sum(posterior**2, axis=0)
+    gains = np.divide(squared, denominator, out=np.zeros_like(squared), where=denominator > tolerance)
+    gains *= float(np.asarray(model._y_train_std).reshape(-1)[0])**2 / len(evaluation)
+    if not np.all(np.isfinite(gains)):
+        raise ValueError("Nonfinite informative gains.")
+    return gains
+
+
 # Return moment-corrected concentration mean/std from restored latent target moments.
 def inverse_predictions(
     mean: np.ndarray,

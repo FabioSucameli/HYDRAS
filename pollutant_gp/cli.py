@@ -143,7 +143,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Values at or below this threshold are hidden in standalone concentration maps, "
-            "leaving the marine-domain background visible."
+            "leaving the marine-domain background visible (default: 0)."
         ),
     )
     parser.add_argument(
@@ -458,6 +458,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--robot-study", action="store_true",
                         help="Compare random-walk robots with ideal static references; double RBF + clipping.")
+    parser.add_argument("--robot-policy", choices=("random-walk", "informative"), default="random-walk",
+                        help="Default: historical random-walk study. Informative: closed-loop IPP versus historical random walk only.")
+    parser.add_argument("--ipp-batch-size", type=int, default=2000,
+                        help="Evaluation cells per covariance block for IPP; all valid cells are used (default: 2000).")
     parser.add_argument("--robot-deployment", choices=("central", "uniform-domain", "peak-annulus"), default=None,
                         help="Initial cells: central disk, uniform-domain (default), or oracle peak-annulus.")
     parser.add_argument("--robot-near-count", type=int, default=3,
@@ -477,7 +481,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--robot-start-center", type=float, nargs=2, metavar=("X", "Y"),
                         help="Optional deployment center; default is the nearest sea cell to the largest component centroid.")
     parser.add_argument("--robot-checkpoints", type=int, nargs="+", default=[100, 200, 300, 400, 500, 600, 700, 800],
-                        help="Measurement budgets at which to fit (default: 100 200 ... 800).")
+                        help="Saved comparison budgets (default: 100 200 ... 800). IPP fits after every acquisition round.")
     parser.add_argument("--robot-gif", action="store_true",
                         help="Save GP overview and robots-only GIFs with a two-second end pause; no extra fits.")
     parser.add_argument("--robot-map-style", choices=("quantitative", "transparent"), default="quantitative",
@@ -499,6 +503,11 @@ def parse_args() -> argparse.Namespace:
             parser.error("Positivity multiseed compares Direct + clipping against sqrt; omit --allow-negative-predictions.")
     if args.robot_study_seeds is not None and not args.robot_study_multiseed:
         parser.error("--robot-study-seeds requires --robot-study-multiseed.")
+    if args.robot_policy == "informative":
+        if not args.robot_study or args.robot_study_multiseed:
+            parser.error("Informative policy requires --robot-study; multiseed is not implemented for IPP yet.")
+        if args.ipp_batch_size < 1:
+            parser.error("--ipp-batch-size must be positive.")
     if args.robot_study_multiseed:
         args.robot_study = True
         if args.robot_study_seeds is None:
@@ -513,10 +522,11 @@ def parse_args() -> argparse.Namespace:
     if args.length_scale_lower_bound is None:
         args.length_scale_lower_bound = .02 if args.robot_study else .05
     if args.output_dir is None:
-        args.output_dir = Path("outputs/robot_multiseed" if args.robot_study_multiseed else
+        args.output_dir = Path("outputs/robot_informative" if args.robot_policy == "informative" else
+                               "outputs/robot_multiseed" if args.robot_study_multiseed else
                                "outputs/robot_sampling" if args.robot_study else "outputs")
     if args.concentration_display_threshold is None:
-        args.concentration_display_threshold = .01 if args.robot_study else 0.
+        args.concentration_display_threshold = 0.01
     if args.robot_gif and not args.robot_study:
         parser.error("--robot-gif requires --robot-study.")
     if args.robot_deployment is not None and not args.robot_study:
