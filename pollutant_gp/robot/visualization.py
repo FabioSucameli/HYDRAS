@@ -197,7 +197,8 @@ def plot_robot_movement(grid, walk, args, base, unit):
         headings[step] = np.where(np.linalg.norm(moves, axis=1) > 1e-10,
                                   np.arctan2(moves[:, 1], moves[:, 0]), headings[step - 1])
     heading = axis.set_title("", fontsize=12)
-    figure.supxlabel("Recorded random walk | schematic robots, not to scale | frozen field", fontsize=9)
+    policy = "Informative motion" if getattr(args, "robot_policy", "random-walk") == "informative" else "Recorded random walk"
+    figure.supxlabel(f"{policy} | schematic robots, not to scale | frozen field", fontsize=9)
 
     def update(step):
         for robot, patches in enumerate(robots):
@@ -250,7 +251,8 @@ def concentration_colorbar(fig, mesh, axes, map_style, **kwargs):
 
 
 # Keep concentration limits shared across all checkpoints, methods and animation frames.
-def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indices):
+def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indices, *,
+                       robot_label="Robot", reference_label="Uniform budget", reference_walk=None):
     paths = []
     map_style = getattr(args, "robot_map_style", "quantitative")
     threshold = args.concentration_display_threshold
@@ -260,6 +262,8 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
     checkpoints = args.robot_checkpoints
     title = (f"{args.nc_file.stem} | time index {args.time_index} | sampling seed {args.random_seed}"
              f" | {walk.deployment}")
+    if reference_walk is not None:
+        title += f" | {robot_label} vs {reference_label}"
 
     fig, axis = plt.subplots(figsize=(9, 7), constrained_layout=True)
     mesh = draw_map(axis, grid, grid.field, vmax, unit, threshold, map_style)
@@ -283,13 +287,14 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
                              squeeze=False, constrained_layout=True)
     for row, count in enumerate(checkpoints):
         step = count // args.n_robots
-        mobile = results[("Robot", count)]
-        reference = results[("Uniform budget", count)]
+        mobile = results[(robot_label, count)]
+        reference = results[(reference_label, count)]
         for col, (values, limit, cutoff, label) in enumerate((
             (grid.field, vmax, threshold, "Ground truth + trajectories"),
-            (mobile.mean_field, vmax, threshold, "Robot GP + clip"),
-            (reference.mean_field, vmax, threshold, "Uniform budget GP + clip"),
-            (mobile.std_field, stdmax, None, "Robot Predictive standard deviation"),
+            (mobile.mean_field, vmax, threshold, f"{robot_label} GP + clip"),
+            (reference.mean_field, vmax, threshold, f"{reference_label} GP + clip"),
+            (mobile.std_field, stdmax, None, f"{robot_label} std (incl. White)" if reference_walk is not None
+             else "Robot Predictive standard deviation"),
         )):
             mesh = draw_map(axes[row, col], grid, values, limit, unit, cutoff,
                             map_style if col < 3 else "quantitative")
@@ -315,8 +320,8 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
                ("prediction_at_true_peak", "Prediction at true maximum"),
                ("zero_rmse", "RMSE: c = 0"), ("low_rmse", "RMSE: 0 < c <= 1"),
                ("high_rmse", "RMSE: c > 1"))
-    for layout, color, marker in (("Robot", "#b2182b", "o"), ("Uniform budget", "#176d9c", "s"),
-                                   ("Uniform distinct", "#b46a00", "^")):
+    layouts = list(dict.fromkeys(r["layout"] for r in rows))
+    for layout, color, marker in zip(layouts, ("#b2182b", "#176d9c", "#b46a00"), ("o", "s", "^")):
         subset = [r for r in rows if r["layout"] == layout]
         for axis, (metric, label) in zip(axes.ravel(), metrics):
             axis.plot([r["checkpoint"] for r in subset], [r[metric] for r in subset],
@@ -335,13 +340,14 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
     count = max(checkpoints)
     path = base.with_name(base.name + "_peak_zoom.png")
     plot_robot_peak(
-        grid, {name: results[(name, count)].mean_field for name in ("Robot", "Uniform budget")},
-        {"Robot": observations_up_to(walk, count), "Uniform budget": uniform_indices[:count]},
+        grid, {name: results[(name, count)].mean_field for name in (robot_label, reference_label)},
+        {robot_label: observations_up_to(walk, count),
+         reference_label: observations_up_to(reference_walk, count) if reference_walk is not None else uniform_indices[:count]},
         args.peak_radius, path, unit, f"{title}\nN={count}", threshold, vmax, map_style)
     paths.append(path)
 
     if args.robot_gif:
-        paths.extend(plot_robot_gifs(grid, walk, results, args, base, unit))
+        paths.extend(plot_robot_gifs(grid, walk, results, args, base, unit, robot_label=robot_label))
     return paths
 
 
@@ -356,8 +362,9 @@ def plot_robot_peak(grid, fields, sampled, radius, path, unit, title, threshold,
     indices = {name: np.unique(values) for name, values in sampled.items()}
     counts = {name: int(disk.ravel()[values].sum()) for name, values in indices.items()}
     fig, axes = plt.subplots(1, 3, figsize=(12.4, 4.8), constrained_layout=True)
-    for axis, name in zip(axes, ("Ground truth", "Robot", "Uniform budget")):
-        layout = "Robot" if name == "Ground truth" else name
+    names = list(fields)
+    for axis, name in zip(axes, ("Ground truth", *names)):
+        layout = names[0] if name == "Ground truth" else name
         values = grid.field if name == "Ground truth" else fields[name]
         mesh = draw_map(axis, local_grid, values, vmax, unit, threshold, map_style)
         cells = indices[layout]
@@ -376,16 +383,18 @@ def plot_robot_peak(grid, fields, sampled, radius, path, unit, title, threshold,
 
 
 # Replay both GIFs from recorded arrays without saving PNGs or running any GP fits.
-def plot_robot_gifs(grid, walk, results, args, base, unit):
+def plot_robot_gifs(grid, walk, results, args, base, unit, *, robot_label="Robot"):
     paths = []
     map_style = getattr(args, "robot_map_style", "quantitative")
     threshold = args.concentration_display_threshold
     vmax = max(float(np.max(grid.field[grid.valid_mask])),
                *(float(np.max(r.mean_field[grid.valid_mask])) for r in results.values()), 1e-12)
     stdmax = max(*(float(np.max(r.std_field[grid.valid_mask])) for r in results.values()), 1e-12)
-    checkpoints = args.robot_checkpoints
+    checkpoints = sorted(n for label, n in results if label == robot_label)
     title = (f"{args.nc_file.stem} | time index {args.time_index} | sampling seed {args.random_seed}"
              f" | {walk.deployment}")
+    if robot_label != "Robot":
+        title += f" | {robot_label}; GP updated each round, maps at checkpoints"
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
     empty = np.full_like(grid.field, np.nan)
     truth_mesh = draw_map(axes[0], grid, grid.field, vmax, unit, threshold, map_style)
@@ -407,10 +416,11 @@ def plot_robot_gifs(grid, walk, results, args, base, unit):
         ready = [n for n in checkpoints if n <= count]
         if ready:
             last = max(ready)
-            result = results[("Robot", last)]
+            result = results[(robot_label, last)]
             mean_mesh.set_array(np.ma.masked_where(~grid.valid_mask | (result.mean_field <= threshold), result.mean_field))
             std_mesh.set_array(np.ma.masked_where(~grid.valid_mask, result.std_field))
-            axes[1].set_title(f"GP + clip | last fit: N={last}", fontsize=11)
+            caption = "saved map" if robot_label != "Robot" else "last fit"
+            axes[1].set_title(f"GP + clip | {caption}: N={last}", fontsize=11)
             axes[2].set_title(f"Predictive standard deviation | N={last}", fontsize=10)
         else:
             mean_mesh.set_array(np.ma.masked_invalid(empty))

@@ -28,6 +28,42 @@ def write_rows(path, rows):
         writer.writeheader()
         writer.writerows(rows)
 
+# Shared historical two-start fitting protocol; select only by converged sensor LML.
+def fit_robot_model(args, rotated, indices, values, scaler, count, layout, optimizer_rows, base, unit):
+    
+    optimizer_seed = args.random_seed if args.optimizer_seed is None else args.optimizer_seed
+    candidates = []
+    for name, first, second, amplitude in INITIALIZATIONS["Double"]:
+        model, _, diagnostic = fit_gaussian_process(
+            rotated[indices], values, "anisotropic",
+            args.length_scale_lower_bound, args.length_scale_upper_bound,
+            args.noise_level_initial, args.noise_level_lower_bound, args.noise_level_upper_bound,
+            "none", 0, optimizer_seed, constant_value_initial=amplitude,
+            length_scale_initial=first, second_length_scale_initial=second, coordinate_scaler=scaler)
+        run = diagnostic.optimizer_runs[diagnostic.selected_run_index]
+        entry = dict(checkpoint=count, layout=layout, initialization=name, success=run.success,
+                     status=run.status, message=run.message, iterations=run.iterations,
+                     evaluations=run.function_evaluations, lml=diagnostic.final_lml,
+                     target_mean=diagnostic.target_mean, target_scale=diagnostic.target_scale,
+                     physical_length_scales=json.dumps(diagnostic.physical_length_scales.tolist()))
+        for parameter in diagnostic.hyperparameters:
+            entry[parameter.name] = parameter.optimized_value
+            entry[parameter.name + "_initial"] = parameter.initial_value
+            entry[parameter.name + "_lower_hit"] = parameter.at_lower_bound
+            entry[parameter.name + "_upper_hit"] = parameter.at_upper_bound
+        optimizer_rows.append(entry)
+        if args.verbose_optimizer_diagnostics:
+            print_kernel_fit(name, diagnostic, unit)
+        elif not run.success:
+            print(f"WARNING {name}: status={run.status}; {run.message}", flush=True)
+        candidates.append((name, model, scaler, diagnostic))
+    write_rows(base.with_name(base.name + "_optimizer.csv"), optimizer_rows)
+    try:
+        name, model, _, diagnostic = select_converged_fit(candidates)
+    except RuntimeError as error:
+        raise RobotFitError(f"Seed {args.random_seed}, N={count}, {layout}: {error}") from error
+    return name, model, diagnostic
+
 
 # Save geometry-only diagnostics from a generated or archived walk, without GP fitting.
 def save_robot_geometry_diagnostics(grid, walk, radius, base, unit):
@@ -68,7 +104,6 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
         raise ValueError("No common unobserved cells globally or in the diagnostic disk.")
     rotated = coordinate_transform.transform(xy)
     scaler = StandardScaler().fit(rotated[grid.valid_mask.ravel()])
-    optimizer_seed = seed if args.optimizer_seed is None else args.optimizer_seed
     base = output_path.with_name(f"{output_path.stem}_seed_{seed}_robot")
     base.parent.mkdir(parents=True, exist_ok=True)
     geometry_paths = (save_robot_geometry_diagnostics(grid, walk,
@@ -110,38 +145,9 @@ def run_robot_study(args, grid, coordinate_transform, output_path, coordinate_un
             print(f"\nN={count}, {layout}: {len(indices)} distinct cells", flush=True)
             if key not in cache:
                 values = grid.field.ravel()[indices]
-                candidates = []
-                for name, first, second, amplitude in INITIALIZATIONS["Double"]:
-                    model, _, diagnostic = fit_gaussian_process(
-                        rotated[indices], values, "anisotropic",
-                        args.length_scale_lower_bound, args.length_scale_upper_bound,
-                        args.noise_level_initial, args.noise_level_lower_bound, args.noise_level_upper_bound,
-                        "none", 0, optimizer_seed, constant_value_initial=amplitude,
-                        length_scale_initial=first, second_length_scale_initial=second,
-                        coordinate_scaler=scaler,
-                    )
-                    run = diagnostic.optimizer_runs[diagnostic.selected_run_index]
-                    entry = dict(checkpoint=count, layout=layout, initialization=name, success=run.success,
-                                 status=run.status, message=run.message, iterations=run.iterations,
-                                 evaluations=run.function_evaluations, lml=diagnostic.final_lml,
-                                 target_mean=diagnostic.target_mean, target_scale=diagnostic.target_scale,
-                                 physical_length_scales=json.dumps(diagnostic.physical_length_scales.tolist()))
-                    for parameter in diagnostic.hyperparameters:
-                        entry[parameter.name] = parameter.optimized_value
-                        entry[parameter.name + "_initial"] = parameter.initial_value
-                        entry[parameter.name + "_lower_hit"] = parameter.at_lower_bound
-                        entry[parameter.name + "_upper_hit"] = parameter.at_upper_bound
-                    optimizer_rows.append(entry)
-                    if args.verbose_optimizer_diagnostics:
-                        print_kernel_fit(name, diagnostic, coordinate_unit)
-                    elif not run.success:
-                        print(f"WARNING {name}: status={run.status}; {run.message}", flush=True)
-                    candidates.append((name, model, scaler, diagnostic))
-                write_rows(base.with_name(base.name + "_optimizer.csv"), optimizer_rows)
-                try:
-                    name, model, _, diagnostic = select_converged_fit(candidates)
-                except RuntimeError as error:
-                    raise RobotFitError(f"Seed {seed}, N={count}, {layout}: {error}") from error
+                name, model, diagnostic = fit_robot_model(
+                    args, rotated, indices, values, scaler, count, layout,
+                    optimizer_rows, base, coordinate_unit)
                 raw = reconstruct_field(grid, model, scaler, args.prediction_batch_size,
                                         "none", False, coordinate_transform)
                 prediction = np.maximum(raw.mean_field, 0)
