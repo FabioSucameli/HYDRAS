@@ -394,7 +394,9 @@ def plot_robot_gifs(grid, walk, results, args, base, unit, *, robot_label="Robot
     title = (f"{args.nc_file.stem} | time index {args.time_index} | sampling seed {args.random_seed}"
              f" | {walk.deployment}")
     if robot_label != "Robot":
-        title += f" | {robot_label}; GP updated each round, maps at checkpoints"
+        complete = all(n in checkpoints for n in range(args.n_robots, args.n_robots * args.n_steps + 1, args.n_robots))
+        cadence = "GP and maps every acquisition" if complete else "maps at saved checkpoints"
+        title += f" | {robot_label}; {cadence}"
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
     empty = np.full_like(grid.field, np.nan)
     truth_mesh = draw_map(axes[0], grid, grid.field, vmax, unit, threshold, map_style)
@@ -419,7 +421,7 @@ def plot_robot_gifs(grid, walk, results, args, base, unit, *, robot_label="Robot
             result = results[(robot_label, last)]
             mean_mesh.set_array(np.ma.masked_where(~grid.valid_mask | (result.mean_field <= threshold), result.mean_field))
             std_mesh.set_array(np.ma.masked_where(~grid.valid_mask, result.std_field))
-            caption = "saved map" if robot_label != "Robot" else "last fit"
+            caption = "current GP" if robot_label != "Robot" and complete else "saved map" if robot_label != "Robot" else "last fit"
             axes[1].set_title(f"GP + clip | {caption}: N={last}", fontsize=11)
             axes[2].set_title(f"Predictive standard deviation | N={last}", fontsize=10)
         else:
@@ -436,3 +438,23 @@ def plot_robot_gifs(grid, walk, results, args, base, unit, *, robot_label="Robot
     paths.append(path)
     paths.append(plot_robot_movement(grid, walk, args, base, unit))
     return paths
+
+
+def plot_robot_uncertainty(rows, path, title):
+    fig, axis = plt.subplots(figsize=(8, 4.8))
+    for layout, color, marker in (("Informative", "#b2182b", "o"), ("Random walk", "#176d9c", "s")):
+        subset = sorted((r for r in rows if r["layout"] == layout), key=lambda r: r["checkpoint"])
+        axis.plot([r["checkpoint"] for r in subset], [r["mean_latent_variance"] for r in subset],
+                  color=color, marker=marker, markersize=3.5, linewidth=1.7, label=layout)
+    axis.set(title="Latent field", xlabel="Acquired measurements", ylim=(0, None))
+    axis.grid(alpha=.2)
+    axis.set_ylabel("Mean variance over all valid cells (concentration^2)")
+    axis.legend(frameon=False)
+    fig.suptitle(title)
+    fig.text(.5, .025, "Markers show evaluated fits: IPP each acquisition; random walk at comparison checkpoints.\n"
+             "Hyperparameters and target scaling are refitted: variance need not decrease monotonically.",
+             ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, .12, 1, .94))
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path

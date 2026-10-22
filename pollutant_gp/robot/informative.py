@@ -7,7 +7,7 @@ from time import perf_counter
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-from pollutant_gp.model import integrated_variance_reduction
+from pollutant_gp.model import integrated_variance_reduction, latent_variance
 from pollutant_gp.peak import measure_peak
 from pollutant_gp.peak_sampling import common_unsampled_mask
 from pollutant_gp.positivity import prediction_metrics
@@ -16,7 +16,17 @@ from pollutant_gp.robot.study import fit_robot_model, write_rows
 from pollutant_gp.robot.trajectories import (
     cell_at, observations_up_to, segment_is_navigable, simulate_random_walk,
 )
-from pollutant_gp.robot.visualization import plot_robot_results
+from pollutant_gp.robot.visualization import plot_robot_results, plot_robot_uncertainty
+
+
+def uncertainty_summary(std, valid, white_level, target_scale, count, layout):
+    """Mean of variances, not square of mean std; same full valid domain for both policies."""
+    observed = np.asarray(std)[valid]**2
+    latent = latent_variance(np.asarray(std)[valid], white_level, target_scale)
+    return dict(checkpoint=count, layout=layout, valid_count=int(valid.sum()),
+                mean_latent_variance=float(latent.mean()),
+                mean_predictive_variance=float(observed.mean()),
+                white_variance=float(white_level * target_scale**2), target_scale=float(target_scale))
 
 # Score actual measurement cells; all robots use the same pre-movement GP.
 # No concentration values are read here. Previously observed cells yield zero
@@ -93,7 +103,8 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
     optimizer_rows, round_rows, decision_rows, candidate_rows = [], [], [], []
     snapshots, snapshot_fits = {}, {}
     round_theta, round_normalization = [], []
-    map_counts = set(args.robot_checkpoints) | {args.n_robots}
+    comparison_counts = set(args.robot_checkpoints) | {args.n_robots}
+    map_counts = set(range(args.n_robots, args.n_samples + 1, args.n_robots))
     previous_indices = None
     print("\n=== Informative motion versus historical random walk ===", flush=True)
     print("Eight feasible headings; full valid grid Z; posterior latent covariance; White + alpha denominator.")
@@ -155,12 +166,15 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                  annulus_inner=walk.annulus_inner, annulus_outer=walk.annulus_outer, near_count=walk.near_count,
                  coordinate_mean=scaler.mean_, coordinate_scale=scaler.scale_,
                  rotation_degrees=coordinate_transform.angle_degrees, coordinate_unit=coordinate_unit,
+                 rotation_center=np.array([coordinate_transform.center_x, coordinate_transform.center_y]),
                  config=json.dumps(vars(args), default=str), checkpoints=np.array(args.robot_checkpoints),
                  map_checkpoints=np.array(sorted(map_counts)), round_theta=np.array(round_theta),
                  round_target_normalization=np.array(round_normalization))
-    rows, results = [], {}
+    rows, uncertainty_rows, results = [], [], {}
     for count in sorted(map_counts):
         for layout, trajectory in (("Informative", walk), ("Random walk", random_walk)):
+            if layout == "Random walk" and count not in comparison_counts:
+                continue
             indices = observations_up_to(trajectory, count)
             if layout == "Informative":
                 raw = snapshots[count]
@@ -182,6 +196,9 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                                      mse=metrics["full_rmse"]**2, r2=metrics["full_r2"])
             peak = measure_peak(grid, reconstruction, indices, grid.field.ravel()[indices], args.peak_radius)
             results[(layout, count)] = reconstruction
+            white_level = next(p.optimized_value for p in diagnostic.hyperparameters if p.name == "k2__noise_level")
+            uncertainty_rows.append(uncertainty_summary(
+                raw.std_field, grid.valid_mask, white_level, diagnostic.target_scale, count, layout))
             steps = count // args.n_robots
             row = dict(seed=args.random_seed, checkpoint=count, layout=layout, deployment=walk.deployment,
                        measurements=count, distinct_cells=len(indices), revisits=count - len(indices),
@@ -206,12 +223,148 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
             saved[tag + "_indices"] = indices
             saved[tag + "_raw_mean"] = raw.mean_field
             saved[tag + "_std"] = raw.std_field
+            saved[tag + "_white_level"] = white_level
+            saved[tag + "_target_scale"] = diagnostic.target_scale
+    write_rows(base.with_name(base.name + "_uncertainty.csv"), uncertainty_rows)
     fields_path = base.with_name(base.name + "_fields.npz")
     np.savez_compressed(fields_path, **saved)
     if save_artifacts:
         paths = plot_robot_results(grid, walk, results, rows, args, base, coordinate_unit, None,
                                    robot_label="Informative", reference_label="Random walk", reference_walk=random_walk)
+        paths.append(plot_robot_uncertainty(uncertainty_rows, base.with_name(base.name + "_uncertainty.png"),
+                                           f"{walk.deployment} | seed {args.random_seed}"))
         for path in paths:
             print(f"Saved: {path}")
     print(f"Saved CSV diagnostics and replay fields: {fields_path}")
     return rows, walk, common
+
+
+def refresh_informative_outputs(archive, output_dir):
+    """Complete archived IPP maps at frozen theta/normalization, without optimization or motion."""
+    import csv
+    from pathlib import Path
+    from shutil import copy2
+    from types import SimpleNamespace
+    from sklearn.gaussian_process import GaussianProcessRegressor
+    from pollutant_gp.model import build_kernel
+    from pollutant_gp.robot.trajectories import RobotWalk
+    from pollutant_gp.spatial import RotationTransform, build_rotation_transform
+    from pollutant_gp.types import GridData
+
+    archive, output_dir = Path(archive), Path(output_dir)
+    if output_dir.resolve() == archive.parent.resolve():
+        raise ValueError("Use a different output directory to preserve the original experiment.")
+    if not archive.name.endswith("_fields.npz"):
+        raise ValueError("Expected an IPP _fields.npz archive.")
+    source_base = archive.with_name(archive.name.removesuffix("_fields.npz"))
+    with np.load(archive, allow_pickle=False) as stored:
+        data = {name: stored[name] for name in stored.files}
+    if str(data.get("policy", "")) != "informative":
+        raise ValueError("Replay requires an informative-study archive.")
+    args = SimpleNamespace(**json.loads(str(data["config"])))
+    args.nc_file = Path(args.nc_file)
+    args.robot_gif = True
+    grid = GridData(data["truth"], data["valid"], data["x"], data["y"], "x", "y", None)
+    center = data["deployment_center"] if data["deployment_center"].size else None
+    walk = RobotWalk(data["positions"], data["visits"], data["rejected"], center,
+                     str(data["deployment"]), float(data["annulus_inner"]),
+                     float(data["annulus_outer"]), int(data["near_count"]))
+    baseline = replace(walk, positions=data["random_positions"], cell_indices=data["random_visits"],
+                       rejected=data["random_rejected"])
+    transform = build_rotation_transform(grid, float(data["rotation_degrees"]), "archived current")
+    if "rotation_center" in data:
+        transform = RotationTransform(transform.angle_degrees, *data["rotation_center"], "archived current")
+    scaler = StandardScaler()
+    scaler.mean_, scaler.scale_ = data["coordinate_mean"], data["coordinate_scale"]
+    scaler.var_, scaler.n_features_in_ = scaler.scale_**2, 2
+    xy = np.column_stack((grid.x_grid.ravel(), grid.y_grid.ravel()))
+    scaled = scaler.transform(transform.transform(xy))
+    kernel = build_kernel(2, "anisotropic", args.length_scale_lower_bound, args.length_scale_upper_bound,
+                          args.noise_level_initial, args.noise_level_lower_bound, args.noise_level_upper_bound,
+                          constant_value_initial=.5, length_scale_initial=1., second_length_scale_initial=.1)
+
+    def read_csv(suffix):
+        with source_base.with_name(source_base.name + suffix).open(newline="", encoding="utf-8") as stream:
+            return list(csv.DictReader(stream))
+
+    metrics = read_csv("_metrics.csv")
+    optimizer = read_csv("_optimizer.csv")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base = output_dir / source_base.name
+    counts = list(range(args.n_robots, args.n_samples + 1, args.n_robots))
+    if len(data["round_theta"]) != len(counts) or len(data["round_target_normalization"]) != len(counts):
+        raise ValueError("Archive does not contain every IPP fit.")
+    results, uncertainty = {}, []
+    for step, count in enumerate(counts):
+        tag = f"informative_{count}"
+        normalization = data["round_target_normalization"][step]
+        frozen_kernel = kernel.clone_with_theta(data["round_theta"][step])
+        missing = tag + "_raw_mean" not in data
+        # Validate restoration against the first and final stored fits before trusting missing maps.
+        if missing or count in (counts[0], counts[-1]):
+            indices = observations_up_to(walk, count)
+            model = GaussianProcessRegressor(kernel=frozen_kernel, alpha=1e-10, optimizer=None, normalize_y=False)
+            targets = (grid.field.ravel()[indices].astype(float) - normalization[0]) / normalization[1]
+            model.fit(scaled[indices], targets)
+            raw = reconstruct_field(grid, model, scaler, args.prediction_batch_size, "none", False,
+                                    transform, tuple(normalization))
+            if not missing:
+                np.testing.assert_allclose(raw.mean_field, data[tag + "_raw_mean"], rtol=1e-8, atol=1e-9)
+                np.testing.assert_allclose(raw.std_field, data[tag + "_std"], rtol=1e-8, atol=1e-9)
+            else:
+                data[tag + "_indices"] = indices
+                data[tag + "_raw_mean"], data[tag + "_std"] = raw.mean_field, raw.std_field
+            print(f"Replay N={count}: {'predicted missing map' if missing else 'verified stored fit'}; optimizer=None", flush=True)
+        data[tag + "_white_level"] = float(frozen_kernel.k2.noise_level)
+        data[tag + "_target_scale"] = float(normalization[1])
+        results[("Informative", count)] = SimpleNamespace(
+            mean_field=np.maximum(data[tag + "_raw_mean"], 0.), std_field=data[tag + "_std"])
+        uncertainty.append(uncertainty_summary(data[tag + "_std"], grid.valid_mask,
+                                              data[tag + "_white_level"], normalization[1], count, "Informative"))
+        tag = f"random_walk_{count}"
+        if tag + "_std" in data:
+            if tag + "_white_level" in data:
+                white, scale = float(data[tag + "_white_level"]), float(data[tag + "_target_scale"])
+            elif count == args.n_robots:
+                white, scale = float(frozen_kernel.k2.noise_level), float(normalization[1])
+            else:
+                metric = next(r for r in metrics if r["layout"] == "Random walk" and int(r["checkpoint"]) == count)
+                fit = next(r for r in optimizer if r["layout"] == "Random walk" and int(r["checkpoint"]) == count
+                           and r["initialization"] == metric["initialization"] and r["success"] == "True")
+                white, scale = float(fit["k2__noise_level"]), float(fit["target_scale"])
+            data[tag + "_white_level"], data[tag + "_target_scale"] = white, scale
+            results[("Random walk", count)] = SimpleNamespace(
+                mean_field=np.maximum(data[tag + "_raw_mean"], 0.), std_field=data[tag + "_std"])
+            uncertainty.append(uncertainty_summary(data[tag + "_std"], grid.valid_mask, white, scale, count, "Random walk"))
+    data["map_checkpoints"] = np.array(counts)
+    data["replayed_from"] = str(archive.resolve())
+    np.savez_compressed(base.with_name(base.name + "_fields.npz"), **data)
+    write_rows(base.with_name(base.name + "_uncertainty.csv"), uncertainty)
+    # Keep experimental metrics and optimization logs byte-for-byte, rather than recomputing them.
+    for suffix in ("_metrics.csv", "_optimizer.csv", "_rounds.csv", "_decisions.csv", "_candidates.csv"):
+        source = source_base.with_name(source_base.name + suffix)
+        if source.exists():
+            copy2(source, base.with_name(base.name + suffix))
+    for row in metrics:
+        for key, value in row.items():
+            try:
+                row[key] = float(value)
+            except ValueError:
+                pass
+    unit = str(data["coordinate_unit"])
+    paths = plot_robot_results(grid, walk, results, metrics, args, base, unit, None,
+                               robot_label="Informative", reference_label="Random walk", reference_walk=baseline)
+    paths.append(plot_robot_uncertainty(uncertainty, base.with_name(base.name + "_uncertainty.png"),
+                                       f"{walk.deployment} | seed {args.random_seed}"))
+    for path in paths:
+        print(f"Saved: {path}")
+    return paths
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Refresh IPP maps/GIF and mean variance from archived fits; no optimization.")
+    parser.add_argument("--replay-fields", required=True)
+    parser.add_argument("--output-dir", required=True, help="New directory; original results are preserved.")
+    replay_args = parser.parse_args()
+    refresh_informative_outputs(replay_args.replay_fields, replay_args.output_dir)
