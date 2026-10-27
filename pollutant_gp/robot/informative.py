@@ -13,6 +13,7 @@ from pollutant_gp.peak_sampling import common_unsampled_mask
 from pollutant_gp.positivity import prediction_metrics
 from pollutant_gp.reconstruction import reconstruct_field
 from pollutant_gp.robot.study import fit_robot_model, write_rows
+from pollutant_gp.robot.informative_checkpoint import load_checkpoint, restore_model, save_checkpoint
 from pollutant_gp.robot.trajectories import (
     cell_at, observations_up_to, segment_is_navigable, simulate_random_walk,
 )
@@ -80,12 +81,15 @@ def choose_informative_moves(grid, positions, step_length, observed, model, scal
 # The historical random walk is regenerated with its original RNG/protocol and
 # fitted only at requested checkpoints, not replaced by an eight-direction walk.
 # No cached experiment is silently accepted without a provenance check.
-def run_informative_study(args, grid, coordinate_transform, output_path, coordinate_unit, *, save_artifacts=True):
+def run_informative_study(args, grid, coordinate_transform, output_path, coordinate_unit, *,
+                          save_artifacts=True, checkpoint_dir=None):
     
     if coordinate_transform is None:
         raise ValueError("IPP requires current-informed coordinates.")
     base = output_path.with_name(f"{output_path.stem}_seed_{args.random_seed}_informative")
     base.parent.mkdir(parents=True, exist_ok=True)
+    if checkpoint_dir is not None:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
     random_walk = simulate_random_walk(
         grid, args.n_robots, args.n_steps, args.robot_step, args.robot_start_radius,
         args.random_seed, args.robot_start_center, args.robot_deployment,
@@ -104,8 +108,11 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
     snapshots, snapshot_fits = {}, {}
     round_theta, round_normalization = [], []
     comparison_counts = set(args.robot_checkpoints) | {args.n_robots}
-    map_counts = set(range(args.n_robots, args.n_samples + 1, args.n_robots))
+    map_counts = (comparison_counts if checkpoint_dir is not None else
+                  set(range(args.n_robots, args.n_samples + 1, args.n_robots)))
+    round_uncertainty = []
     previous_indices = None
+    model = None
     print("\n=== Informative motion versus historical random walk ===", flush=True)
     print("Eight feasible headings; full valid grid Z; posterior latent covariance; White + alpha denominator.")
     print("Direct targets + clipping; shared starts; two LML-selected starts per fit; no inducing points.")
@@ -116,19 +123,45 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
         visits = cells[:step + 1].ravel()
         _, first = np.unique(visits, return_index=True)
         indices = visits[np.sort(first)]
+        checkpoint = checkpoint_dir / f"ipp_{count:06d}.npz" if checkpoint_dir is not None else None
+        if checkpoint is not None and checkpoint.exists():
+            cached = load_checkpoint(checkpoint)
+            np.testing.assert_array_equal(indices, cached["indices"])
+            name, diagnostic = cached["name"], cached["diagnostic"]
+            previous_indices, model = indices.copy(), None
+            round_theta.append(cached["theta"])
+            round_normalization.append((diagnostic.target_mean, diagnostic.target_scale))
+            round_rows.append(cached["round_row"])
+            round_uncertainty.append(cached["uncertainty"])
+            optimizer_rows.extend(cached["optimizer_rows"])
+            if count in map_counts:
+                snapshots[count], snapshot_fits[count] = cached["raw"], (name, diagnostic)
+            if step + 1 < args.n_steps:
+                positions[step + 1] = cached["next_positions"]
+                cells[step + 1] = cell_at(grid, positions[step + 1])
+                rejected[step + 1] = cached["next_rejected"]
+            rng.bit_generator.state = cached["rng_state"]
+            print(f"IPP N={count}: restored completed round", flush=True)
+            continue
+        optimizer_start = len(optimizer_rows)
         start = perf_counter()
         refitted = previous_indices is None or not np.array_equal(indices, previous_indices)
         if refitted:
             name, model, diagnostic = fit_robot_model(
                 args, rotated, indices, grid.field.ravel()[indices], scaler, count,
                 "Informative", optimizer_rows, base, coordinate_unit)
+        elif model is None:
+            model = restore_model(args, round_theta[-1], scaled[indices], grid.field.ravel()[indices], diagnostic)
         fit_seconds = perf_counter() - start
         previous_indices = indices.copy()
         round_theta.append(model.kernel_.theta.copy())
         round_normalization.append((diagnostic.target_mean, diagnostic.target_scale))
+        raw = reconstruct_field(grid, model, scaler, args.prediction_batch_size, "none", False, coordinate_transform)
+        round_uncertainty.append(uncertainty_summary(
+            raw.std_field, grid.valid_mask, float(model.kernel_.k2.noise_level), diagnostic.target_scale,
+            count, "Informative"))
         if count in map_counts:
-            snapshots[count] = reconstruct_field(
-                grid, model, scaler, args.prediction_batch_size, "none", False, coordinate_transform)
+            snapshots[count] = raw
             snapshot_fits[count] = (name, diagnostic)
         score_seconds = 0.
         if step + 1 < args.n_steps:
@@ -137,15 +170,23 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                 grid, positions[step], args.robot_step, indices, model, scaled, rng, args.ipp_batch_size)
             cells[step + 1] = cell_at(grid, positions[step + 1])
             score_seconds = perf_counter() - start
-            decision_rows.extend(dict(acquisition=step + 2, model_measurements=count, **r) for r in decisions)
-            candidate_rows.extend(dict(acquisition=step + 2, model_measurements=count, **r) for r in candidates)
-            write_rows(base.with_name(base.name + "_decisions.csv"), decision_rows)
-            write_rows(base.with_name(base.name + "_candidates.csv"), candidate_rows)
+            if checkpoint_dir is None:
+                decision_rows.extend(dict(acquisition=step + 2, model_measurements=count, **r) for r in decisions)
+                candidate_rows.extend(dict(acquisition=step + 2, model_measurements=count, **r) for r in candidates)
+                write_rows(base.with_name(base.name + "_decisions.csv"), decision_rows)
+                write_rows(base.with_name(base.name + "_candidates.csv"), candidate_rows)
         round_rows.append(dict(acquisition=step + 1, measurements=count, distinct_cells=len(indices),
                                refitted=refitted, initialization=name, lml=diagnostic.final_lml,
                                white_level=float(model.kernel_.k2.noise_level),
                                target_mean=diagnostic.target_mean, target_scale=diagnostic.target_scale,
                                fit_seconds=fit_seconds, scoring_seconds=score_seconds))
+        if checkpoint is not None:
+            save_checkpoint(checkpoint, raw if count in map_counts else None, name, diagnostic,
+                            model.kernel_.theta, optimizer_rows[optimizer_start:], indices=indices,
+                            round_row=round_rows[-1], uncertainty=round_uncertainty[-1],
+                            rng_state=rng.bit_generator.state,
+                            next_positions=positions[step + 1] if step + 1 < args.n_steps else None,
+                            next_rejected=rejected[step + 1] if step + 1 < args.n_steps else None)
         write_rows(base.with_name(base.name + "_rounds.csv"), round_rows)
         print(f"IPP N={count}: {len(indices)} cells; {name}; LML={diagnostic.final_lml:.6g}; "
               f"fit={fit_seconds:.2f}s, scoring={score_seconds:.2f}s", flush=True)
@@ -170,7 +211,8 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                  config=json.dumps(vars(args), default=str), checkpoints=np.array(args.robot_checkpoints),
                  map_checkpoints=np.array(sorted(map_counts)), round_theta=np.array(round_theta),
                  round_target_normalization=np.array(round_normalization))
-    rows, uncertainty_rows, results = [], [], {}
+    write_rows(base.with_name(base.name + "_rounds.csv"), round_rows)
+    rows, uncertainty_rows, results = [], list(round_uncertainty), {}
     for count in sorted(map_counts):
         for layout, trajectory in (("Informative", walk), ("Random walk", random_walk)):
             if layout == "Random walk" and count not in comparison_counts:
@@ -184,11 +226,23 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                 raw = snapshots[count]
                 name, diagnostic = snapshot_fits[count]
             else:
-                name, model, diagnostic = fit_robot_model(
-                    args, rotated, indices, grid.field.ravel()[indices], scaler, count,
-                    layout, optimizer_rows, base, coordinate_unit)
-                raw = reconstruct_field(grid, model, scaler, args.prediction_batch_size,
-                                        "none", False, coordinate_transform)
+                checkpoint = checkpoint_dir / f"random_{count:06d}.npz" if checkpoint_dir is not None else None
+                if checkpoint is not None and checkpoint.exists():
+                    cached = load_checkpoint(checkpoint)
+                    np.testing.assert_array_equal(indices, cached["indices"])
+                    name, diagnostic, raw = cached["name"], cached["diagnostic"], cached["raw"]
+                    optimizer_rows.extend(cached["optimizer_rows"])
+                    print(f"Random walk N={count}: restored completed fit", flush=True)
+                else:
+                    optimizer_start = len(optimizer_rows)
+                    name, model, diagnostic = fit_robot_model(
+                        args, rotated, indices, grid.field.ravel()[indices], scaler, count,
+                        layout, optimizer_rows, base, coordinate_unit)
+                    raw = reconstruct_field(grid, model, scaler, args.prediction_batch_size,
+                                            "none", False, coordinate_transform)
+                    if checkpoint is not None:
+                        save_checkpoint(checkpoint, raw, name, diagnostic, model.kernel_.theta,
+                                        optimizer_rows[optimizer_start:], indices=indices)
             prediction = np.maximum(raw.mean_field, 0.)
             metrics = prediction_metrics(grid.field, raw.mean_field, prediction, grid.valid_mask, common, local)
             metrics["local_full_rmse"] = float(np.sqrt(np.mean((prediction[local] - grid.field[local])**2)))
@@ -197,8 +251,9 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
             peak = measure_peak(grid, reconstruction, indices, grid.field.ravel()[indices], args.peak_radius)
             results[(layout, count)] = reconstruction
             white_level = next(p.optimized_value for p in diagnostic.hyperparameters if p.name == "k2__noise_level")
-            uncertainty_rows.append(uncertainty_summary(
-                raw.std_field, grid.valid_mask, white_level, diagnostic.target_scale, count, layout))
+            if layout == "Random walk":
+                uncertainty_rows.append(uncertainty_summary(
+                    raw.std_field, grid.valid_mask, white_level, diagnostic.target_scale, count, layout))
             steps = count // args.n_robots
             row = dict(seed=args.random_seed, checkpoint=count, layout=layout, deployment=walk.deployment,
                        measurements=count, distinct_cells=len(indices), revisits=count - len(indices),
@@ -225,7 +280,9 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
             saved[tag + "_std"] = raw.std_field
             saved[tag + "_white_level"] = white_level
             saved[tag + "_target_scale"] = diagnostic.target_scale
+    uncertainty_rows.sort(key=lambda row: (row["checkpoint"], row["layout"]))
     write_rows(base.with_name(base.name + "_uncertainty.csv"), uncertainty_rows)
+    write_rows(base.with_name(base.name + "_optimizer.csv"), optimizer_rows)
     fields_path = base.with_name(base.name + "_fields.npz")
     np.savez_compressed(fields_path, **saved)
     if save_artifacts:
