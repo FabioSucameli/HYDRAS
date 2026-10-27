@@ -36,6 +36,7 @@ from pollutant_gp.positivity import run_positivity_study
 from pollutant_gp.positivity_multiseed import run_positivity_multiseed
 from pollutant_gp.robot.study import run_robot_study
 from pollutant_gp.robot.informative import run_informative_study
+from pollutant_gp.robot.informative_multiseed import run_informative_multiseed
 from pollutant_gp.robot.multiseed import run_robot_multiseed
 from pollutant_gp.peak_visualization import (
     plot_peak_diagnostics,
@@ -653,7 +654,8 @@ def run_workflow(args: argparse.Namespace) -> None:
         figure_path = make_output_figure_path(
             args.output_dir, args.figure_name, args.nc_file, time_index, args.n_samples,
         )
-        study = (run_informative_study if args.robot_policy == "informative" else
+        study = (run_informative_multiseed if args.robot_policy == "informative" and args.robot_study_multiseed else
+                 run_informative_study if args.robot_policy == "informative" else
                  run_robot_multiseed if args.robot_study_multiseed else run_robot_study)
         study(args, grid_data, coordinate_transform, figure_path, coordinate_unit)
         return

@@ -474,6 +474,8 @@ def parse_args() -> argparse.Namespace:
                         help="Run the same robot protocol over multiple seeds, saving aggregate metrics and a figure.")
     parser.add_argument("--robot-study-seeds", type=int, nargs="+", default=None,
                         help="Distinct nonnegative seeds for --robot-study-multiseed (default: 1 through 100).")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume an informative multiseed run in the same output directory, including completed rounds within a seed.")
     parser.add_argument("--n-robots", type=int, default=20, help="Number of mobile robots (default: 20).")
     parser.add_argument("--n-steps", type=int, default=40, help="Acquisitions per robot including initial (default: 40).")
     parser.add_argument("--robot-step", type=float, default=60., help="Move length in grid units (default: 60).")
@@ -504,10 +506,12 @@ def parse_args() -> argparse.Namespace:
     if args.robot_study_seeds is not None and not args.robot_study_multiseed:
         parser.error("--robot-study-seeds requires --robot-study-multiseed.")
     if args.robot_policy == "informative":
-        if not args.robot_study or args.robot_study_multiseed:
-            parser.error("Informative policy requires --robot-study; multiseed is not implemented for IPP yet.")
+        if not (args.robot_study or args.robot_study_multiseed):
+            parser.error("Informative policy requires --robot-study or --robot-study-multiseed.")
         if args.ipp_batch_size < 1:
             parser.error("--ipp-batch-size must be positive.")
+    if args.resume and not (args.robot_study_multiseed and args.robot_policy == "informative"):
+        parser.error("--resume requires --robot-study-multiseed --robot-policy informative.")
     if args.robot_study_multiseed:
         args.robot_study = True
         if args.robot_study_seeds is None:
@@ -522,7 +526,8 @@ def parse_args() -> argparse.Namespace:
     if args.length_scale_lower_bound is None:
         args.length_scale_lower_bound = .02 if args.robot_study else .05
     if args.output_dir is None:
-        args.output_dir = Path("outputs/robot_informative" if args.robot_policy == "informative" else
+        args.output_dir = Path("outputs/ipp_multiseed" if args.robot_policy == "informative" and args.robot_study_multiseed else
+                               "outputs/robot_informative" if args.robot_policy == "informative" else
                                "outputs/robot_multiseed" if args.robot_study_multiseed else
                                "outputs/robot_sampling" if args.robot_study else "outputs")
     if args.concentration_display_threshold is None:
