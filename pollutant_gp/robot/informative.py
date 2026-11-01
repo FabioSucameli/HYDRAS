@@ -29,10 +29,25 @@ def uncertainty_summary(std, valid, white_level, target_scale, count, layout):
                 mean_predictive_variance=float(observed.mean()),
                 white_variance=float(white_level * target_scale**2), target_scale=float(target_scale))
 
-# Score actual measurement cells; all robots use the same pre-movement GP.
-# No concentration values are read here. Previously observed cells yield zero
-# new information because the noiseless simulation deduplicates acquisitions.
-def choose_informative_moves(grid, positions, step_length, observed, model, scaled_xy, rng, batch_size=2000):
+def concentration_weights(predicted_mean, fraction):
+    """Mixture of uniform mass and positive GP mean; no ground truth or peak location."""
+    if not np.isfinite(fraction) or not 0 <= fraction <= 1:
+        raise ValueError("Concentration weight must be in [0, 1].")
+    mean = np.asarray(predicted_mean, dtype=float)
+    if mean.ndim != 1 or not len(mean) or not np.isfinite(mean).all():
+        raise ValueError("A finite nonempty vector of predicted means is required.")
+    positive = np.maximum(mean, 0.)
+    maximum = positive.max()
+    if fraction == 0 or maximum == 0:
+        return np.full(len(mean), 1. / len(mean))
+    positive = positive / maximum
+    return (1. - fraction) / len(mean) + fraction * positive / positive.sum()
+
+
+# Score actual cells with the same pre-movement GP and fixed weights for all robots.
+# Previously observed cells yield zero gain because noiseless acquisitions are deduplicated.
+def choose_informative_moves(grid, positions, step_length, observed, model, scaled_xy, rng, batch_size=2000,
+                             evaluation_weights=None):
     
     angles = np.arange(8) * np.pi / 4
     ends = positions[:, None, :] + step_length * np.column_stack((np.cos(angles), np.sin(angles)))
@@ -43,7 +58,7 @@ def choose_informative_moves(grid, positions, step_length, observed, model, scal
             valid[robot, direction] = cells[robot, direction] >= 0 and segment_is_navigable(grid, start, end)
     new_cells = np.setdiff1d(np.unique(cells[valid]), observed)
     gains = integrated_variance_reduction(
-        model, scaled_xy[grid.valid_mask.ravel()], scaled_xy[new_cells], batch_size)
+        model, scaled_xy[grid.valid_mask.ravel()], scaled_xy[new_cells], batch_size, evaluation_weights)
     gain_by_cell = dict(zip(new_cells.tolist(), gains.tolist()))
     scores = np.full(cells.shape, np.nan)
     for robot, direction in zip(*np.nonzero(valid)):
@@ -113,11 +128,13 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
     round_uncertainty = []
     previous_indices = None
     model = None
+    concentration_weight = getattr(args, "ipp_concentration_weight", 0.)
     print("\n=== Informative motion versus historical random walk ===", flush=True)
     print("Eight feasible headings; full valid grid Z; posterior latent covariance; White + alpha denominator.")
     print("Direct targets + clipping; shared starts; two LML-selected starts per fit; no inducing points.")
     print("Random walk unchanged: continuous random angles, rejected moves stay in place.")
     print("Baseline fits are recomputed at checkpoints; no archived metrics with different masks are reused.")
+    print(f"Concentration weight: {concentration_weight:g}; weights use the positive GP mean, never ground truth.")
     for step in range(args.n_steps):
         count = (step + 1) * args.n_robots
         visits = cells[:step + 1].ravel()
@@ -164,10 +181,13 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
             snapshots[count] = raw
             snapshot_fits[count] = (name, diagnostic)
         score_seconds = 0.
+        evaluation_weights = (concentration_weights(raw.mean_field[grid.valid_mask], concentration_weight)
+                              if concentration_weight else None)
         if step + 1 < args.n_steps:
             start = perf_counter()
             positions[step + 1], rejected[step + 1], decisions, candidates = choose_informative_moves(
-                grid, positions[step], args.robot_step, indices, model, scaled, rng, args.ipp_batch_size)
+                grid, positions[step], args.robot_step, indices, model, scaled, rng, args.ipp_batch_size,
+                evaluation_weights=evaluation_weights)
             cells[step + 1] = cell_at(grid, positions[step + 1])
             score_seconds = perf_counter() - start
             if checkpoint_dir is None:
@@ -176,6 +196,9 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                 write_rows(base.with_name(base.name + "_decisions.csv"), decision_rows)
                 write_rows(base.with_name(base.name + "_candidates.csv"), candidate_rows)
         round_rows.append(dict(acquisition=step + 1, measurements=count, distinct_cells=len(indices),
+                               ipp_concentration_weight=concentration_weight,
+                               weight_effective_cells=float(1. / np.sum(evaluation_weights**2))
+                               if evaluation_weights is not None else int(grid.valid_mask.sum()),
                                refitted=refitted, initialization=name, lml=diagnostic.final_lml,
                                white_level=float(model.kernel_.k2.noise_level),
                                target_mean=diagnostic.target_mean, target_scale=diagnostic.target_scale,
@@ -256,6 +279,7 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                     raw.std_field, grid.valid_mask, white_level, diagnostic.target_scale, count, layout))
             steps = count // args.n_robots
             row = dict(seed=args.random_seed, checkpoint=count, layout=layout, deployment=walk.deployment,
+                       ipp_concentration_weight=concentration_weight,
                        measurements=count, distinct_cells=len(indices), revisits=count - len(indices),
                        rejected_moves=int(trajectory.rejected[:steps].sum()),
                        distance_total=float(np.linalg.norm(np.diff(trajectory.positions[:steps], axis=0), axis=2).sum()),
@@ -289,7 +313,8 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
         paths = plot_robot_results(grid, walk, results, rows, args, base, coordinate_unit, None,
                                    robot_label="Informative", reference_label="Random walk", reference_walk=random_walk)
         paths.append(plot_robot_uncertainty(uncertainty_rows, base.with_name(base.name + "_uncertainty.png"),
-                                           f"{walk.deployment} | seed {args.random_seed}"))
+                                           f"{walk.deployment} | seed {args.random_seed}" +
+                                           (f" | weighted IPP beta={concentration_weight:g}" if concentration_weight else "")))
         for path in paths:
             print(f"Saved: {path}")
     print(f"Saved CSV diagnostics and replay fields: {fields_path}")
@@ -412,7 +437,9 @@ def refresh_informative_outputs(archive, output_dir):
     paths = plot_robot_results(grid, walk, results, metrics, args, base, unit, None,
                                robot_label="Informative", reference_label="Random walk", reference_walk=baseline)
     paths.append(plot_robot_uncertainty(uncertainty, base.with_name(base.name + "_uncertainty.png"),
-                                       f"{walk.deployment} | seed {args.random_seed}"))
+                                       f"{walk.deployment} | seed {args.random_seed}" +
+                                       (f" | weighted IPP beta={args.ipp_concentration_weight:g}"
+                                        if getattr(args, "ipp_concentration_weight", 0.) else "")))
     for path in paths:
         print(f"Saved: {path}")
     return paths

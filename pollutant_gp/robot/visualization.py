@@ -264,6 +264,8 @@ def plot_robot_results(grid, walk, results, rows, args, base, unit, uniform_indi
              f" | {walk.deployment}")
     if reference_walk is not None:
         title += f" | {robot_label} vs {reference_label}"
+    if getattr(args, "ipp_concentration_weight", 0.):
+        title += f"\nConcentration-weighted IPP | beta={args.ipp_concentration_weight:g}"
 
     fig, axis = plt.subplots(figsize=(9, 7), constrained_layout=True)
     mesh = draw_map(axis, grid, grid.field, vmax, unit, threshold, map_style)
@@ -397,6 +399,8 @@ def plot_robot_gifs(grid, walk, results, args, base, unit, *, robot_label="Robot
         complete = all(n in checkpoints for n in range(args.n_robots, args.n_robots * args.n_steps + 1, args.n_robots))
         cadence = "GP and maps every acquisition" if complete else "maps at saved checkpoints"
         title += f" | {robot_label}; {cadence}"
+    if getattr(args, "ipp_concentration_weight", 0.):
+        title += f"\nConcentration-weighted IPP | beta={args.ipp_concentration_weight:g}"
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
     empty = np.full_like(grid.field, np.nan)
     truth_mesh = draw_map(axes[0], grid, grid.field, vmax, unit, threshold, map_style)
@@ -448,13 +452,10 @@ def plot_robot_uncertainty(rows, path, title):
                   color=color, marker=marker, markersize=3.5, linewidth=1.7, label=layout)
     axis.set(title="Latent field", xlabel="Acquired measurements", ylim=(0, None))
     axis.grid(alpha=.2)
-    axis.set_ylabel("Mean variance over all valid cells (concentration^2)")
+    axis.set_ylabel("Mean latent variance [C\u00b2]")
     axis.legend(frameon=False)
     fig.suptitle(title)
-    fig.text(.5, .025, "Markers show evaluated fits: IPP each acquisition; random walk at comparison checkpoints.\n"
-             "Hyperparameters and target scaling are refitted: variance need not decrease monotonically.",
-             ha="center", fontsize=9)
-    fig.tight_layout(rect=(0, .12, 1, .94))
+    fig.tight_layout(rect=(0, 0, 1, .94))
     fig.savefig(path, dpi=180)
     plt.close(fig)
     return path

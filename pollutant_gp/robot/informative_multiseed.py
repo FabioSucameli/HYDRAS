@@ -132,7 +132,7 @@ def publish(root, completed, statuses, checkpoints):
     return summary, uncertainty_summary
 
 
-def plot_summary(summary, metrics, labels, path, completed, requested):
+def plot_summary(summary, metrics, labels, path, completed, requested, concentration_weight=0.):
     fig, axes = plt.subplots(len(metrics), 1, figsize=(9, 4 * len(metrics)), squeeze=False,
                              sharex=True, layout="constrained")
     for ax, metric, label in zip(axes.ravel(), metrics, labels):
@@ -150,7 +150,8 @@ def plot_summary(summary, metrics, labels, path, completed, requested):
         ax.spines[["top", "right"]].set_visible(False)
     axes[0, 0].legend(frameon=False)
     axes[-1, 0].set_xlabel("Acquired measurements")
-    fig.suptitle(f"IPP vs random walk | {completed}/{requested} complete seeds\nMean +/- 1 sample standard deviation")
+    policy = f"Weighted IPP (beta={concentration_weight:g})" if concentration_weight else "IPP"
+    fig.suptitle(f"{policy} vs random walk | {completed}/{requested} complete seeds\nMean +/- 1 sample standard deviation")
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
@@ -212,11 +213,11 @@ def run_informative_multiseed(args, grid, coordinate_transform, output_path, coo
         summary, uncertainty_summary = publish(root, completed, statuses, args.robot_checkpoints)
     if completed:
         plot_summary(summary, ERRORS[:2], ("Global RMSE (all valid cells)", "Local RMSE (full peak disk)"),
-                     root / "multiseed_rmse.png", len(completed), len(statuses))
+                     root / "multiseed_rmse.png", len(completed), len(statuses), args.ipp_concentration_weight)
         plot_summary(summary, ERRORS[2:4], ("Global RMSE (common unobserved)", "Local RMSE (common unobserved)"),
-                     root / "multiseed_unseen_rmse.png", len(completed), len(statuses))
+                     root / "multiseed_unseen_rmse.png", len(completed), len(statuses), args.ipp_concentration_weight)
         plot_summary(uncertainty_summary, ("mean_latent_variance",), ("Mean latent variance [C\u00b2]",),
-                     root / "multiseed_latent_variance.png", len(completed), len(statuses))
+                     root / "multiseed_latent_variance.png", len(completed), len(statuses), args.ipp_concentration_weight)
     print(f"Completed {len(completed)}/{len(statuses)} paired seeds. Results: {root}", flush=True)
     if len(completed) != len(statuses):
         raise RuntimeError("Study incomplete: inspect seed_status.csv and run again with --resume.")
