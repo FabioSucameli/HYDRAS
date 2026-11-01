@@ -188,17 +188,24 @@ def latent_variance(observation_std, white_level, target_scale):
     return np.maximum(variance, 0.)
 
 
-def integrated_variance_reduction(model, evaluation, candidates, batch_size=2000):
+def integrated_variance_reduction(model, evaluation, candidates, batch_size=2000, evaluation_weights=None):
     """One-observation reduction of mean latent variance, in restored target units.
 
     Inputs are already rotated/standardized. The fitted kernel must be signal +
     WhiteKernel, with scalar alpha and sklearn target normalization. White noise
     and alpha enter only the hypothetical observation denominator, not C(Z, A).
+    Optional nonnegative evaluation weights are normalized to sum to one.
     """
     from scipy.linalg import cho_solve, solve_triangular
 
     if batch_size < 1 or len(evaluation) == 0:
         raise ValueError("A nonempty evaluation grid and positive batch size are required.")
+    if evaluation_weights is not None:
+        evaluation_weights = np.asarray(evaluation_weights, dtype=float)
+        if (evaluation_weights.shape != (len(evaluation),) or not np.isfinite(evaluation_weights).all()
+                or np.any(evaluation_weights < 0) or not 0 < evaluation_weights.sum() < np.inf):
+            raise ValueError("Evaluation weights must be finite, nonnegative, aligned and have positive sum.")
+        evaluation_weights = evaluation_weights / evaluation_weights.sum()
     if not hasattr(model.kernel_, "k2") or not isinstance(model.kernel_.k2, WhiteKernel):
         raise ValueError("IPP requires a signal + WhiteKernel fitted kernel.")
     if np.ndim(model.alpha) != 0 or np.asarray(model._y_train_std).size != 1:
@@ -218,9 +225,13 @@ def integrated_variance_reduction(model, evaluation, candidates, batch_size=2000
     for start in range(0, len(evaluation), batch_size):
         points = evaluation[start:start + batch_size]
         posterior = signal(points, candidates) - signal(points, model.X_train_) @ weights
-        squared += np.sum(posterior**2, axis=0)
+        if evaluation_weights is None:
+            squared += np.sum(posterior**2, axis=0)
+        else:
+            squared += evaluation_weights[start:start + len(points)] @ (posterior**2)
     gains = np.divide(squared, denominator, out=np.zeros_like(squared), where=denominator > tolerance)
-    gains *= float(np.asarray(model._y_train_std).reshape(-1)[0])**2 / len(evaluation)
+    gains *= float(np.asarray(model._y_train_std).reshape(-1)[0])**2 / (
+        len(evaluation) if evaluation_weights is None else 1)
     if not np.all(np.isfinite(gains)):
         raise ValueError("Nonfinite informative gains.")
     return gains

@@ -462,6 +462,8 @@ def parse_args() -> argparse.Namespace:
                         help="Default: historical random-walk study. Informative: closed-loop IPP versus historical random walk only.")
     parser.add_argument("--ipp-batch-size", type=int, default=2000,
                         help="Evaluation cells per covariance block for IPP; all valid cells are used (default: 2000).")
+    parser.add_argument("--ipp-concentration-weight", type=float, default=0.,
+                        help="IPP weight mixture in [0,1]: 0 preserves uniform IPP; 0.5 mixes equal uniform and positive predicted-concentration mass.")
     parser.add_argument("--robot-deployment", choices=("central", "uniform-domain", "peak-annulus"), default=None,
                         help="Initial cells: central disk, uniform-domain (default), or oracle peak-annulus.")
     parser.add_argument("--robot-near-count", type=int, default=3,
@@ -505,6 +507,10 @@ def parse_args() -> argparse.Namespace:
             parser.error("Positivity multiseed compares Direct + clipping against sqrt; omit --allow-negative-predictions.")
     if args.robot_study_seeds is not None and not args.robot_study_multiseed:
         parser.error("--robot-study-seeds requires --robot-study-multiseed.")
+    if not 0 <= args.ipp_concentration_weight <= 1:
+        parser.error("--ipp-concentration-weight must be finite and in [0,1].")
+    if args.ipp_concentration_weight and args.robot_policy != "informative":
+        parser.error("--ipp-concentration-weight requires --robot-policy informative.")
     if args.robot_policy == "informative":
         if not (args.robot_study or args.robot_study_multiseed):
             parser.error("Informative policy requires --robot-study or --robot-study-multiseed.")
@@ -526,7 +532,9 @@ def parse_args() -> argparse.Namespace:
     if args.length_scale_lower_bound is None:
         args.length_scale_lower_bound = .02 if args.robot_study else .05
     if args.output_dir is None:
-        args.output_dir = Path("outputs/ipp_multiseed" if args.robot_policy == "informative" and args.robot_study_multiseed else
+        args.output_dir = Path("outputs/ipp_weighted_multiseed" if args.ipp_concentration_weight and args.robot_study_multiseed else
+                               "outputs/ipp_weighted" if args.ipp_concentration_weight else
+                               "outputs/ipp_multiseed" if args.robot_policy == "informative" and args.robot_study_multiseed else
                                "outputs/robot_informative" if args.robot_policy == "informative" else
                                "outputs/robot_multiseed" if args.robot_study_multiseed else
                                "outputs/robot_sampling" if args.robot_study else "outputs")
