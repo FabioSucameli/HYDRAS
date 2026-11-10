@@ -370,6 +370,23 @@ uniform and half follows the estimated concentration. The weights are recalculat
 so the policy can focus on the estimated plume while maintaining interest in the rest of the domain.
 Both policies use observed data, without access to the true peak location.
 
+### IPP animations
+
+The same seed as the random-walk examples illustrates both informative policies. 
+
+**IPP with uniform spatial weights**
+
+![Seed 48: IPP trajectories, GP reconstruction and predictive standard deviation](outputs/ipp_seed48.gif)
+
+**Concentration-weighted IPP, beta=0.5**
+
+![Seed 48: concentration-weighted IPP trajectories, GP reconstruction and predictive standard deviation](outputs/ipp_weighted_seed48.gif)
+
+Each animation shows ground truth with trajectories, the GP reconstruction and predictive standard
+deviation, including WhiteKernel. In these noiseless runs the GP is updated after each round of
+20 measurements when new cells are available. Planning uses latent covariance. Refitting hyperparameters and target
+normalisation can increase uncertainty between rounds, even as observations accumulate.
+
 ### Four-policy comparison over 100 seeds
 
 The comparison keeps 20 robots, 40 acquisitions, nominal 60 m steps, the two-scale current-informed
@@ -401,22 +418,7 @@ peak recovery.
 
 Weighted IPP significantly enhances peak reconstruction: the mean predicted concentration at the true peak location increases from 1.648 to 2.946, nearly doubling, against a true value of 7.647. This result highlights the effectiveness of concentration-weighted informative planning in improving plume reconstruction, while indicating further potential for peak recovery.
 
-### IPP animations: seed 48
 
-The same seed as the random-walk examples illustrates both informative policies. 
-
-**IPP with uniform spatial weights**
-
-![Seed 48: IPP trajectories, GP reconstruction and predictive standard deviation](outputs/ipp_seed48.gif)
-
-**Concentration-weighted IPP, beta=0.5**
-
-![Seed 48: concentration-weighted IPP trajectories, GP reconstruction and predictive standard deviation](outputs/ipp_weighted_seed48.gif)
-
-Each animation shows ground truth with trajectories, the GP reconstruction and predictive standard
-deviation, including WhiteKernel. In these noiseless runs the GP is updated after each round of
-20 measurements when new cells are available. Planning uses latent covariance. Refitting hyperparameters and target
-normalisation can increase uncertainty between rounds, even as observations accumulate.
 
 ## Sensor-Noise Robustness
 
