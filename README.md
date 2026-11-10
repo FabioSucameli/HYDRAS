@@ -23,7 +23,9 @@ localisation.
 - [Recovering the Peak](#recovering-the-peak)
 - [Positive Predictions](#positive-predictions)
 - [From Sensors to Mobile Robots](#from-sensors-to-mobile-robots)
-- [Robot Animations: Seed 48](#robot-animations-seed-48)
+- [Robot Animations](#robot-animations)
+- [Informative Path Planning](#informative-path-planning)
+- [Sensor-Noise Robustness](#sensor-noise-robustness)
 - [Repository Structure](#repository-structure)
 - [Installation](#installation)
 - [Data](#data)
@@ -51,45 +53,37 @@ Gaussian Processes are useful here because they return both a mean prediction an
 uncertainty. That makes them suitable not only for interpolation, but also for informative path
 planning. With fixed kernel hyperparameters and observation-noise assumptions, posterior covariance
 depends on measurement locations, not their values. Refitting hyperparameters or target scaling can
-change that uncertainty. Informative planning and source localisation remain future work.
+change that uncertainty. Informative planning is implemented and evaluated below;
+autonomous source localisation remains a longer-term objective.
 
 ---
 
 ## How It Works
 
-The baseline pipeline turns one snapshot of a simulated field into a probabilistic reconstruction:
+The experiments follow one sequence: **observe, reconstruct, choose where to measure next**.
 
-```mermaid
-flowchart LR
-    A["NetCDF dataset<br/>Concentration - component 1"] --> B["Select time snapshot"]
-    B --> C["Valid marine mask<br/>np.isfinite(field)"]
-    C --> D["Sample N synthetic sensors<br/>without replacement"]
-    D --> E["Standardise coordinates<br/>StandardScaler"]
-    E --> F["Fit GP<br/>ConstantKernel x RBF + WhiteKernel"]
-    F --> G["Predict over all valid cells<br/>in batches"]
-    G --> H["Clip negatives<br/>optional"]
-    H --> I["Mean map, uncertainty map,<br/>RMSE / MAE / R2"]
-```
+1. **Define the field.** Select a NetCDF snapshot and its valid marine cells. The field stays
+   frozen while robots move, isolating the effect of spatial sampling.
+2. **Collect observations.** Use static sensors or mobile robots. Mobile experiments begin
+   from prescribed deployments and accumulate measurements along their trajectories.
+3. **Fit the GP.** Rotate and scale coordinates, then learn the covariance from observations.
+   The latest experiments use two current-oriented RBF components with independent amplitudes
+   and length scales, plus a WhiteKernel. Two initialisations are compared by sensor LML.
+4. **Choose the next move.** Random walk samples a direction. IPP scores feasible destinations
+   by their expected reduction of latent field variance. Weighted IPP gives additional weight
+   to regions where the current GP predicts higher concentration. Move, measure and repeat.
+5. **Evaluate the reconstruction.** Compare predictions with the simulated truth using global
+   and local RMSE, concentration bands and peak diagnostics. Maps and GIFs show how coverage evolves.
 
-The physically informed variant changes **only the coordinate system in which the covariance is
-defined**. The field, the grid and the output maps are untouched:
-
-```mermaid
-flowchart LR
-    W["Wind file"] --> M["Mean transport direction<br/>over a time window"]
-    U["Current file<br/>U/V NetCDF"] --> M
-    M --> T["Rotation angle theta"]
-    T --> R["Rotate sensor and prediction<br/>coordinates about the domain centre"]
-    R --> K["Fit the anisotropic RBF<br/>in the rotated frame"]
-    K --> P["Predict, then report the maps<br/>in the original coordinates"]
-```
-
-The orientation angle theta comes from separate wind or current data, not from the concentration
-ground truth. This is a transport-oriented covariance, not a PDE-constrained GP.
+The current direction comes from a separate velocity dataset. Planning uses the fitted GP,
+observations and marine geometry; unobserved concentrations are reserved for evaluation.
+The explicitly labelled oracle deployment is a separate control with privileged peak information.
 
 ---
 
+
 ## Thesis Roadmap
+
 
 ```mermaid
 flowchart TD
@@ -106,9 +100,8 @@ flowchart TD
 ```
 
 
-
-Static reconstruction and random-walk trajectory sampling are implemented. Informative planning
-and source localisation are the next stages, not capabilities demonstrated by the current results.
+Completed results below, with noiseless measurements
+for the mobile comparisons. They establish reconstruction performance in this scenario.
 
 ---
 
@@ -142,6 +135,10 @@ Implemented:
   studied over 100 seeds, with checkpoint maps and GIFs;
 - matched uniform references, a cross-deployment Pure Uniform comparison, and geometric
   proximity and step-length diagnostics;
+- **IPP and concentration-weighted IPP**, with paired random-walk controls over 100 seeds,
+  round-level checkpoints, resumable runs and GIFs updated at each GP fit;
+- a four-policy comparison with **Pure Uniform**, evaluated on common complete spatial domains;
+- a sensor-noise study runner retaining independent noisy revisits;
 - NetCDF inspection utilities.
 
 ---
@@ -279,10 +276,9 @@ and 12/20 enriched cases. Separate diagnostics for `c=0`, `0<c<=1`, `c>1` and th
 prevent a good score on the clean background from hiding errors in the plume.
 These bounds differ from the robot experiments below; this is not a direct ranking across studies.
 
-## Robots
+## From Sensors to Mobile Robots:
 
-**From Sensors to Mobile Robots:**
-the field remains frozen at CL02 time index 729. Twenty point-like robots collect 40 measurements
+The field remains frozen at CL02 time index 729. Twenty point-like robots collect 40 measurements
 each (initial positions plus 39 movement attempts), giving **800 acquisitions, not necessarily 800
 distinct cells**. The random walk uses a nominal 60 m step and valid-grid geometry. Repeated noiseless
 observations are fitted once per distinct cell; no extra measurements are added to replace revisits.
@@ -361,40 +357,112 @@ and predictive standard deviation (including WhiteKernel). The GP is updated at 
 ![Seed 48: three robots near the peak, trajectories and GP reconstruction](outputs/robot_annulus_seed48.gif)
 
 ---
+## Informative Path Planning
+
+Random walks establish what the same robots can learn without selecting informative directions.
+**IPP** uses the current GP to choose among eight candidate directions per robot, retaining
+only moves whose segments remain in the valid marine domain. It maximises the expected
+reduction of latent variance across a fixed evaluation grid, using posterior cross-covariances.
+
+**Weighted IPP** changes this objective by mixing uniform spatial weights with weights proportional
+to positive GP predictions. With `--ipp-concentration-weight 0.5`, half of the total weight is
+uniform and half follows the estimated concentration. The weights are recalculated after fitting,
+so the policy can focus on the estimated plume while maintaining interest in the rest of the domain.
+Both policies use observed data, without access to the true peak location.
+
+### Four-policy comparison over 100 seeds
+
+The comparison keeps 20 robots, 40 acquisitions, nominal 60 m steps, the two-scale current-informed
+GP and bounds `[0.02, 100]`. Mobile policies share their Uniform-domain initial positions within
+each seed. Pure Uniform is a static reference with 800 distinct cells and no travel constraints.
+
+| At 800 acquisitions, seeds 1-100 | Global RMSE | Local RMSE |
+|---|---:|---:|
+| Random walk | 0.19684 +/- 0.05860 | 0.80755 +/- 0.29887 |
+| IPP | 0.12423 +/- 0.02101 | 0.70540 +/- 0.14546 |
+| Pure Uniform | 0.12483 +/- 0.02240 | 0.71723 +/- 0.16847 |
+| Weighted IPP, beta=0.5 | **0.10089 +/- 0.02135** | **0.56810 +/- 0.13885** |
+
+Mean +/- sample standard deviation. Global RMSE covers the full valid marine grid; local RMSE
+covers the full 150 m disk around the true maximum. **Both include observed cells**, ensuring
+identical evaluation regions across all four strategies.
+
+![Global and local RMSE for Random walk, IPP, Pure Uniform and weighted IPP over 100 seeds](outputs/ipp_four_policies.png)
+
+Lines show means; shaded bands show one standard deviation across seeds, not confidence intervals.
+IPP reaches a mean global error close to Pure Uniform while collecting measurements along feasible
+trajectories. Weighted IPP further reduces mean global and local RMSE by **18.8% and 19.5%**
+relative to IPP, improving them in **86/100 and 77/100 paired seeds**, respectively.
+
+Peak recovery remains harder than field reconstruction: the mean prediction at the true peak
+increases from **1.648 to 2.946**, against a true value of **7.647**. These results support
+concentration-aware exploration, while distinguishing better plume reconstruction from complete
+peak recovery. 
+
+Weighted IPP significantly enhances peak reconstruction: the mean predicted concentration at the true peak location increases from 1.648 to 2.946, nearly doubling, against a true value of 7.647. This result highlights the effectiveness of concentration-weighted informative planning in improving plume reconstruction, while indicating further potential for peak recovery.
+
+### IPP animations: seed 48
+
+The same seed as the random-walk examples illustrates both informative policies. 
+
+**IPP with uniform spatial weights**
+
+![Seed 48: IPP trajectories, GP reconstruction and predictive standard deviation](outputs/ipp_seed48.gif)
+
+**Concentration-weighted IPP, beta=0.5**
+
+![Seed 48: concentration-weighted IPP trajectories, GP reconstruction and predictive standard deviation](outputs/ipp_weighted_seed48.gif)
+
+Each animation shows ground truth with trajectories, the GP reconstruction and predictive standard
+deviation, including WhiteKernel. In these noiseless runs the GP is updated after each round of
+20 measurements when new cells are available. Planning uses latent covariance. Refitting hyperparameters and target
+normalisation can increase uncertainty between rounds, even as observations accumulate.
+
+## Sensor-Noise Robustness
+
+
+
+---
 
 ## Repository Structure
 
 ```text
-main.py                     Entry point: parses arguments and runs the workflow
+main.py                         Entry point: parses arguments and runs the workflow
 pollutant_gp/
-  cli.py                    Command-line interface
-  data.py                   NetCDF loading, validation and grid preparation
-  inspection.py             NetCDF inspection utilities
-  model.py                  Kernel construction, GP fitting, batched prediction
-  reconstruction.py         Full-field reconstruction and error metrics
-  sampling.py               Synthetic sensor sampling
-  spatial.py                Coordinate rotation used by the physically informed models
-  wind.py                   Wind time series parsing and transport direction
-  current.py                Current U/V fields and mean transport direction
-  peak.py                   Peak-centred metrics and the diagnostic disk
-  peak_sampling.py          Oracle sampling controls at a fixed sensor budget
-  peak_kernel.py            Single versus two-scale kernel comparison
-  peak_visualization.py     Peak zooms and directional profiles
-  positivity.py             Matched target-transform comparison
-  positivity_multiseed.py    Paired Direct/clipping versus sqrt study
+  cli.py                        Command-line interface
+  data.py                       NetCDF loading, validation and grid preparation
+  inspection.py                 NetCDF inspection utilities
+  model.py                      Kernel construction, GP fitting, batched prediction
+  reconstruction.py             Full-field reconstruction and error metrics
+  sampling.py                   Synthetic sensor sampling
+  spatial.py                    Coordinate rotation used by the physically informed models
+  wind.py                       Wind time series parsing and transport direction
+  current.py                    Current U/V fields and mean transport direction
+  peak.py                       Peak-centred metrics and the diagnostic disk
+  peak_sampling.py              Oracle sampling controls at a fixed sensor budget
+  peak_kernel.py                Single versus two-scale kernel comparison
+  peak_visualization.py         Peak zooms and directional profiles
+  positivity.py                 Matched target-transform comparison
+  positivity_multiseed.py       Paired Direct/clipping versus sqrt study
   robot/
-    trajectories.py         Deployments, random walks and domain geometry
-    study.py                Single-seed fitting, baselines and saved maps
-    visualization.py        Robot maps, checkpoint panels and GIFs
-    multiseed.py            Per-seed metrics and aggregate statistics
-    deployment_comparison.py Archived Robot fits versus Pure Uniform
-    proximity.py            Geometric inter-robot proximity diagnostics
-    step_sensitivity.py     Controlled random-walk step-length study
-  types.py                  Shared dataclasses
-  style.py                  Shared palette and figure styling
-  visualization.py          Plot generation
-  workflow.py               Pipeline orchestration and experimental studies
-outputs/                    Selected figures 
+    trajectories.py             Deployments, random walks and domain geometry
+    study.py                    Single-seed fitting, baselines and saved maps
+    visualization.py            Robot maps, checkpoint panels and GIFs
+    multiseed.py                Per-seed metrics and aggregate statistics
+    deployment_comparison.py    Archived Robot fits versus Pure Uniform
+    informative.py              IPP, concentration weights and paired random-walk control
+    informative_checkpoint.py   Round-level fitting checkpoints and restoration
+    informative_multiseed.py    Resumable paired IPP studies and aggregate metrics
+    informative_comparison.py   Archived IPP/random-walk versus Pure Uniform comparison
+    observations.py             Reproducible sensor errors and repeated observations
+    noise_study.py              Four-policy sensor-noise robustness study
+    proximity.py                Geometric inter-robot proximity diagnostics
+    step_sensitivity.py         Controlled random-walk step-length study
+  types.py                      Shared dataclasses
+  style.py                      Shared palette and figure styling
+  visualization.py              Plot generation
+  workflow.py                   Pipeline orchestration and experimental studies
+outputs/                        Selected figures 
 
 requirements.txt
 README.md
@@ -584,6 +652,34 @@ This reuses archived Robot hyperparameters without reoptimising them and predict
 complete the common-domain scores; Pure Uniform is fitted separately. The default input paths
 match the three commands above. Add `--resume` to this comparison command to skip completed seeds.
 
+### Reproduce the IPP animations
+
+These commands use seed 48 and save the informative trajectories, reconstruction GIF and paired
+random-walk diagnostics. The first uses uniform objective weights; the second uses beta=0.5.
+
+```powershell
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study --robot-policy informative --ipp-concentration-weight 0 --robot-deployment uniform-domain --current-informed --current-average-hours 12 --random-seed 48 --n-robots 20 --n-steps 40 --robot-step 60 --robot-checkpoints 100 200 300 400 500 600 700 800 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --n-restarts 0 --target-transform none --clip-negative --robot-map-style transparent --concentration-display-threshold 0 --robot-gif --peak-radius 150 --peak-coordinate-unit m --prediction-batch-size 2000 --ipp-batch-size 2000 --figure-name ipp.png --output-dir outputs/ipp_uniform_seed48
+```
+
+```powershell
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study --robot-policy informative --ipp-concentration-weight 0.5 --robot-deployment uniform-domain --current-informed --current-average-hours 12 --random-seed 48 --n-robots 20 --n-steps 40 --robot-step 60 --robot-checkpoints 100 200 300 400 500 600 700 800 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --n-restarts 0 --target-transform none --clip-negative --robot-map-style transparent --concentration-display-threshold 0 --robot-gif --peak-radius 150 --peak-coordinate-unit m --prediction-batch-size 2000 --ipp-batch-size 2000 --figure-name ipp.png --output-dir outputs/ipp_weighted_beta05_seed48
+```
+
+### IPP studies over 100 seeds
+
+The following command runs IPP and its paired Random walk reference, without individual GIFs.
+Omitting `--robot-study-seeds` selects seeds 1-100.
+
+```powershell
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-study-multiseed --robot-policy informative --ipp-concentration-weight 0 --robot-deployment uniform-domain --current-informed --current-average-hours 12 --n-robots 20 --n-steps 40 --robot-step 60 --robot-checkpoints 100 200 300 400 500 600 700 800 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --n-restarts 0 --target-transform none --clip-negative --peak-radius 150 --peak-coordinate-unit m --prediction-batch-size 2000 --ipp-batch-size 2000 --output-dir outputs/ipp_uniform_100seeds
+```
+
+For weighted IPP, change `--ipp-concentration-weight 0` to `--ipp-concentration-weight 0.5`
+and use a separate directory, such as `--output-dir outputs/ipp_weighted_100seeds`.
+To resume either run, repeat its command with `--resume`, preserving its configuration and directory.
+Resume checks experiment compatibility; it is intended for checkpoints produced by the same code
+and protocol, rather than mixing older archives with a changed implementation.
+
 ## Command-Line Arguments
 
 | Argument | Default | Description |
@@ -620,6 +716,12 @@ match the three commands above. Add `--resume` to this comparison command to ski
 | `--positivity-study-multiseed` | off | Paired D/Q study at N=800; 100 seeds by default |
 | `--robot-study` | off | Single-seed robot experiment |
 | `--robot-study-multiseed` | off | Robot study over seeds 1-100 unless specified |
+| `--robot-policy` | `random-walk` | `random-walk` or `informative` |
+| `--ipp-concentration-weight` | `0.0` | Uniform IPP objective at 0; concentration-aware mixture at 0.5; range [0, 1] |
+| `--ipp-batch-size` | `2000` | Evaluation cells per batch for informative scoring |
+| `--robot-study-seeds` | `1 ... 100` | Explicit seed list for multi-seed robot studies |
+| `--resume` | off | Resume compatible IPP or noise multi-seed checkpoints |
+| `--robot-noise-study` | off | Four-policy noise study; weighted IPP uses 0.5 unless another positive weight is supplied |
 | `--robot-deployment` | `uniform-domain` | `central`, `uniform-domain`, `peak-annulus` |
 | `--robot-annulus-inner` | `50` | Set explicitly to `30` for the reported annulus experiment |
 | `--robot-near-count` | `3` | Robots deployed in the oracle annulus |
@@ -678,4 +780,6 @@ Robot single-seed runs also save checkpoint maps, local zooms, CSV diagnostics a
 aggregate summaries/curves, without generating all per-seed GIFs. The curated README assets are
 copies of existing results.
 
-
+IPP runs additionally save candidate gains, movement decisions, round-level fitting diagnostics
+and mean latent variance curves. Resumable multi-seed runs preserve completed seeds and fitting
+checkpoints; noise-study checkpoints also preserve the actual noisy observations.
