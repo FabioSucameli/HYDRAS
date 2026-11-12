@@ -654,7 +654,9 @@ def run_workflow(args: argparse.Namespace) -> None:
         figure_path = make_output_figure_path(
             args.output_dir, args.figure_name, args.nc_file, time_index, args.n_samples,
         )
-        study = (run_informative_multiseed if args.robot_policy == "informative" and args.robot_study_multiseed else
+        from pollutant_gp.robot.noise_study import run_noise_study
+        study = (run_noise_study if args.robot_noise_study else
+                 run_informative_multiseed if args.robot_policy == "informative" and args.robot_study_multiseed else
                  run_informative_study if args.robot_policy == "informative" else
                  run_robot_multiseed if args.robot_study_multiseed else run_robot_study)
         study(args, grid_data, coordinate_transform, figure_path, coordinate_unit)

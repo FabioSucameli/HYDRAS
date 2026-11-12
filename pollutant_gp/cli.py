@@ -458,6 +458,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--robot-study", action="store_true",
                         help="Compare random-walk robots with ideal static references; double RBF + clipping.")
+    parser.add_argument("--robot-noise-study", action="store_true",
+                        help="Paired Random walk/IPP/weighted IPP/Pure Uniform over 100 seeds; use --noise-std and --resume.")
     parser.add_argument("--robot-policy", choices=("random-walk", "informative"), default="random-walk",
                         help="Default: historical random-walk study. Informative: closed-loop IPP versus historical random walk only.")
     parser.add_argument("--ipp-batch-size", type=int, default=2000,
@@ -491,6 +493,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--robot-map-style", choices=("quantitative", "transparent"), default="quantitative",
                         help="Robot concentration maps/GIFs: original opaque palette (default) or opacity increasing with concentration; visualization only.")
     args = parser.parse_args()
+    if args.robot_noise_study:
+        args.robot_study_multiseed = True
+        args.robot_policy = "informative"
+        if args.ipp_concentration_weight == 0:
+            args.ipp_concentration_weight = .5
+        if args.robot_deployment not in (None, "uniform-domain"):
+            parser.error("--robot-noise-study uses shared uniform-domain starts.")
+    if not math.isfinite(args.noise_std) or args.noise_std < 0:
+        parser.error("--noise-std must be finite and nonnegative.")
     if args.positivity_study_seeds is not None and not args.positivity_study_multiseed:
         parser.error("--positivity-study-seeds requires --positivity-study-multiseed.")
     if args.positivity_study_multiseed:
@@ -532,7 +543,8 @@ def parse_args() -> argparse.Namespace:
     if args.length_scale_lower_bound is None:
         args.length_scale_lower_bound = .02 if args.robot_study else .05
     if args.output_dir is None:
-        args.output_dir = Path("outputs/ipp_weighted_multiseed" if args.ipp_concentration_weight and args.robot_study_multiseed else
+        args.output_dir = Path("outputs/robot_noise_study" if args.robot_noise_study else
+                               "outputs/ipp_weighted_multiseed" if args.ipp_concentration_weight and args.robot_study_multiseed else
                                "outputs/ipp_weighted" if args.ipp_concentration_weight else
                                "outputs/ipp_multiseed" if args.robot_policy == "informative" and args.robot_study_multiseed else
                                "outputs/robot_informative" if args.robot_policy == "informative" else
@@ -565,9 +577,11 @@ def parse_args() -> argparse.Namespace:
             parser.error("--robot-study cannot be combined with other studies or inspection modes.")
         if not (args.current_informed or (args.physically_informed and args.physics_source == "current")):
             parser.error("--robot-study requires current-informed coordinates.")
-        if (args.kernel_mode != "anisotropic" or args.target_transform != "none" or args.noise_std != 0
+        if args.noise_std and args.robot_policy != "informative":
+            parser.error("Noisy robots require --robot-policy informative or --robot-noise-study.")
+        if (args.kernel_mode != "anisotropic" or args.target_transform != "none"
                 or args.n_restarts != 0 or not args.clip_negative):
-            parser.error("Robot baseline requires anisotropic kernels, target none, no sensor noise/restarts and clipping.")
+            parser.error("Robot studies require anisotropic kernels, target none, zero restarts and clipping.")
         if args.n_robots < 1 or args.n_steps < 1 or args.n_samples != args.n_robots * args.n_steps:
             parser.error("Robot budget must equal positive n-robots * n-steps; omit --n-samples or set it to that product.")
         if (args.robot_checkpoints != sorted(set(args.robot_checkpoints))
