@@ -38,7 +38,8 @@ def experiment_manifest(args, grid, transform, unit):
     package = Path(__file__).resolve().parents[1]
     sources = ("model.py", "reconstruction.py", "spatial.py", "peak.py", "peak_sampling.py",
                "peak_kernel.py", "positivity.py", "robot/study.py", "robot/trajectories.py",
-               "robot/informative.py", "robot/informative_checkpoint.py", "robot/informative_multiseed.py")
+               "robot/informative.py", "robot/informative_checkpoint.py", "robot/informative_multiseed.py",
+               "robot/observations.py", "robot/noise_study.py", "robot/deployment_comparison.py")
     return dict(version=1, configuration=configuration, snapshot_sha256=digest.hexdigest(),
                 selected_time=grid.selected_time_label, coordinate_unit=unit,
                 rotation=[transform.angle_degrees, transform.center_x, transform.center_y],

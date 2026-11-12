@@ -13,15 +13,16 @@ from pollutant_gp.peak_sampling import common_unsampled_mask
 from pollutant_gp.positivity import prediction_metrics
 from pollutant_gp.reconstruction import reconstruct_field
 from pollutant_gp.robot.study import fit_robot_model, write_rows
+from pollutant_gp.robot.observations import sensor_errors, training_observations, full_band_metrics
 from pollutant_gp.robot.informative_checkpoint import load_checkpoint, restore_model, save_checkpoint
 from pollutant_gp.robot.trajectories import (
     cell_at, observations_up_to, segment_is_navigable, simulate_random_walk,
 )
 from pollutant_gp.robot.visualization import plot_robot_results, plot_robot_uncertainty
 
-
+# Mean of variances, not square of mean std; same full valid domain for both policies.
 def uncertainty_summary(std, valid, white_level, target_scale, count, layout):
-    """Mean of variances, not square of mean std; same full valid domain for both policies."""
+
     observed = np.asarray(std)[valid]**2
     latent = latent_variance(np.asarray(std)[valid], white_level, target_scale)
     return dict(checkpoint=count, layout=layout, valid_count=int(valid.sum()),
@@ -29,8 +30,9 @@ def uncertainty_summary(std, valid, white_level, target_scale, count, layout):
                 mean_predictive_variance=float(observed.mean()),
                 white_variance=float(white_level * target_scale**2), target_scale=float(target_scale))
 
+# Mixture of uniform mass and positive GP mean; no ground truth or peak location.
 def concentration_weights(predicted_mean, fraction):
-    """Mixture of uniform mass and positive GP mean; no ground truth or peak location."""
+    
     if not np.isfinite(fraction) or not 0 <= fraction <= 1:
         raise ValueError("Concentration weight must be in [0, 1].")
     mean = np.asarray(predicted_mean, dtype=float)
@@ -47,7 +49,7 @@ def concentration_weights(predicted_mean, fraction):
 # Score actual cells with the same pre-movement GP and fixed weights for all robots.
 # Previously observed cells yield zero gain because noiseless acquisitions are deduplicated.
 def choose_informative_moves(grid, positions, step_length, observed, model, scaled_xy, rng, batch_size=2000,
-                             evaluation_weights=None):
+                             evaluation_weights=None, allow_revisits=False):
     
     angles = np.arange(8) * np.pi / 4
     ends = positions[:, None, :] + step_length * np.column_stack((np.cos(angles), np.sin(angles)))
@@ -56,7 +58,7 @@ def choose_informative_moves(grid, positions, step_length, observed, model, scal
     for robot, start in enumerate(positions):
         for direction, end in enumerate(ends[robot]):
             valid[robot, direction] = cells[robot, direction] >= 0 and segment_is_navigable(grid, start, end)
-    new_cells = np.setdiff1d(np.unique(cells[valid]), observed)
+    new_cells = np.unique(cells[valid]) if allow_revisits else np.setdiff1d(np.unique(cells[valid]), observed)
     gains = integrated_variance_reduction(
         model, scaled_xy[grid.valid_mask.ravel()], scaled_xy[new_cells], batch_size, evaluation_weights)
     gain_by_cell = dict(zip(new_cells.tolist(), gains.tolist()))
@@ -97,7 +99,7 @@ def choose_informative_moves(grid, positions, step_length, observed, model, scal
 # fitted only at requested checkpoints, not replaced by an eight-direction walk.
 # No cached experiment is silently accepted without a provenance check.
 def run_informative_study(args, grid, coordinate_transform, output_path, coordinate_unit, *,
-                          save_artifacts=True, checkpoint_dir=None):
+                          save_artifacts=True, checkpoint_dir=None, reference_checkpoint_dir=None):
     
     if coordinate_transform is None:
         raise ValueError("IPP requires current-informed coordinates.")
@@ -105,6 +107,12 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
     base.parent.mkdir(parents=True, exist_ok=True)
     if checkpoint_dir is not None:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if reference_checkpoint_dir is not None:
+        reference_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        reference_checkpoint_dir = checkpoint_dir
+    noise_std = args.noise_std
+    errors = sensor_errors(args.random_seed, args.n_robots * args.n_steps, noise_std)
     random_walk = simulate_random_walk(
         grid, args.n_robots, args.n_steps, args.robot_step, args.robot_start_radius,
         args.random_seed, args.robot_start_center, args.robot_deployment,
@@ -135,15 +143,18 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
     print("Random walk unchanged: continuous random angles, rejected moves stay in place.")
     print("Baseline fits are recomputed at checkpoints; no archived metrics with different masks are reused.")
     print(f"Concentration weight: {concentration_weight:g}; weights use the positive GP mean, never ground truth.")
+    if noise_std:
+        print(f"Sensor noise std={noise_std:g}; independent acquisitions, noisy revisits retained; learned WhiteKernel.")
     for step in range(args.n_steps):
         count = (step + 1) * args.n_robots
         visits = cells[:step + 1].ravel()
-        _, first = np.unique(visits, return_index=True)
-        indices = visits[np.sort(first)]
+        indices, values = training_observations(grid.field, visits, errors, noise_std)
         checkpoint = checkpoint_dir / f"ipp_{count:06d}.npz" if checkpoint_dir is not None else None
         if checkpoint is not None and checkpoint.exists():
             cached = load_checkpoint(checkpoint)
             np.testing.assert_array_equal(indices, cached["indices"])
+            if noise_std:
+                np.testing.assert_array_equal(values, cached["values"])
             name, diagnostic = cached["name"], cached["diagnostic"]
             previous_indices, model = indices.copy(), None
             round_theta.append(cached["theta"])
@@ -165,10 +176,10 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
         refitted = previous_indices is None or not np.array_equal(indices, previous_indices)
         if refitted:
             name, model, diagnostic = fit_robot_model(
-                args, rotated, indices, grid.field.ravel()[indices], scaler, count,
+                args, rotated, indices, values, scaler, count,
                 "Informative", optimizer_rows, base, coordinate_unit)
         elif model is None:
-            model = restore_model(args, round_theta[-1], scaled[indices], grid.field.ravel()[indices], diagnostic)
+            model = restore_model(args, round_theta[-1], scaled[indices], values, diagnostic)
         fit_seconds = perf_counter() - start
         previous_indices = indices.copy()
         round_theta.append(model.kernel_.theta.copy())
@@ -187,7 +198,7 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
             start = perf_counter()
             positions[step + 1], rejected[step + 1], decisions, candidates = choose_informative_moves(
                 grid, positions[step], args.robot_step, indices, model, scaled, rng, args.ipp_batch_size,
-                evaluation_weights=evaluation_weights)
+                evaluation_weights=evaluation_weights, allow_revisits=noise_std > 0)
             cells[step + 1] = cell_at(grid, positions[step + 1])
             score_seconds = perf_counter() - start
             if checkpoint_dir is None:
@@ -195,7 +206,8 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                 candidate_rows.extend(dict(acquisition=step + 2, model_measurements=count, **r) for r in candidates)
                 write_rows(base.with_name(base.name + "_decisions.csv"), decision_rows)
                 write_rows(base.with_name(base.name + "_candidates.csv"), candidate_rows)
-        round_rows.append(dict(acquisition=step + 1, measurements=count, distinct_cells=len(indices),
+        round_rows.append(dict(acquisition=step + 1, measurements=count, distinct_cells=len(np.unique(indices)),
+                               training_observations=len(indices), noise_std=noise_std,
                                ipp_concentration_weight=concentration_weight,
                                weight_effective_cells=float(1. / np.sum(evaluation_weights**2))
                                if evaluation_weights is not None else int(grid.valid_mask.sum()),
@@ -205,13 +217,13 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                                fit_seconds=fit_seconds, scoring_seconds=score_seconds))
         if checkpoint is not None:
             save_checkpoint(checkpoint, raw if count in map_counts else None, name, diagnostic,
-                            model.kernel_.theta, optimizer_rows[optimizer_start:], indices=indices,
+                            model.kernel_.theta, optimizer_rows[optimizer_start:], indices=indices, values=values,
                             round_row=round_rows[-1], uncertainty=round_uncertainty[-1],
                             rng_state=rng.bit_generator.state,
                             next_positions=positions[step + 1] if step + 1 < args.n_steps else None,
                             next_rejected=rejected[step + 1] if step + 1 < args.n_steps else None)
         write_rows(base.with_name(base.name + "_rounds.csv"), round_rows)
-        print(f"IPP N={count}: {len(indices)} cells; {name}; LML={diagnostic.final_lml:.6g}; "
+        print(f"IPP N={count}: {len(np.unique(indices))} cells, {len(indices)} training observations; {name}; LML={diagnostic.final_lml:.6g}; "
               f"fit={fit_seconds:.2f}s, scoring={score_seconds:.2f}s", flush=True)
 
     walk = replace(random_walk, positions=positions, cell_indices=cells, rejected=rejected)
@@ -222,6 +234,8 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
     if not common.any() or not (common & local).any():
         raise ValueError("No common unobserved cells globally or locally; cannot report paired unseen errors.")
     saved = dict(truth=grid.field, valid=grid.valid_mask, x=grid.x_grid, y=grid.y_grid,
+                 sensor_errors=errors, measured_values=grid.field.ravel()[cells] + errors.reshape(cells.shape),
+                 random_measured_values=grid.field.ravel()[random_walk.cell_indices] + errors.reshape(cells.shape),
                  positions=positions, visits=cells, rejected=rejected,
                  random_positions=random_walk.positions, random_visits=random_walk.cell_indices,
                  random_rejected=random_walk.rejected, common_unobserved=common, local=local,
@@ -240,7 +254,7 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
         for layout, trajectory in (("Informative", walk), ("Random walk", random_walk)):
             if layout == "Random walk" and count not in comparison_counts:
                 continue
-            indices = observations_up_to(trajectory, count)
+            indices, values = training_observations(grid.field, trajectory.cell_indices.ravel()[:count], errors, noise_std)
             if layout == "Informative":
                 raw = snapshots[count]
                 name, diagnostic = snapshot_fits[count]
@@ -249,29 +263,33 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                 raw = snapshots[count]
                 name, diagnostic = snapshot_fits[count]
             else:
-                checkpoint = checkpoint_dir / f"random_{count:06d}.npz" if checkpoint_dir is not None else None
+                checkpoint = reference_checkpoint_dir / f"random_{count:06d}.npz" if reference_checkpoint_dir is not None else None
                 if checkpoint is not None and checkpoint.exists():
                     cached = load_checkpoint(checkpoint)
                     np.testing.assert_array_equal(indices, cached["indices"])
+                    if noise_std:
+                        np.testing.assert_array_equal(values, cached["values"])
                     name, diagnostic, raw = cached["name"], cached["diagnostic"], cached["raw"]
                     optimizer_rows.extend(cached["optimizer_rows"])
                     print(f"Random walk N={count}: restored completed fit", flush=True)
                 else:
                     optimizer_start = len(optimizer_rows)
                     name, model, diagnostic = fit_robot_model(
-                        args, rotated, indices, grid.field.ravel()[indices], scaler, count,
+                        args, rotated, indices, values, scaler, count,
                         layout, optimizer_rows, base, coordinate_unit)
                     raw = reconstruct_field(grid, model, scaler, args.prediction_batch_size,
                                             "none", False, coordinate_transform)
                     if checkpoint is not None:
                         save_checkpoint(checkpoint, raw, name, diagnostic, model.kernel_.theta,
-                                        optimizer_rows[optimizer_start:], indices=indices)
+                                        optimizer_rows[optimizer_start:], indices=indices, values=values)
             prediction = np.maximum(raw.mean_field, 0.)
             metrics = prediction_metrics(grid.field, raw.mean_field, prediction, grid.valid_mask, common, local)
             metrics["local_full_rmse"] = float(np.sqrt(np.mean((prediction[local] - grid.field[local])**2)))
+            metrics.update(full_band_metrics(grid.field, prediction, grid.valid_mask))
             reconstruction = replace(raw, mean_field=prediction, rmse=metrics["full_rmse"],
                                      mse=metrics["full_rmse"]**2, r2=metrics["full_r2"])
-            peak = measure_peak(grid, reconstruction, indices, grid.field.ravel()[indices], args.peak_radius)
+            unique_indices, first = np.unique(indices, return_index=True)
+            peak = measure_peak(grid, reconstruction, unique_indices, values[first], args.peak_radius)
             results[(layout, count)] = reconstruction
             white_level = next(p.optimized_value for p in diagnostic.hyperparameters if p.name == "k2__noise_level")
             if layout == "Random walk":
@@ -280,12 +298,13 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
             steps = count // args.n_robots
             row = dict(seed=args.random_seed, checkpoint=count, layout=layout, deployment=walk.deployment,
                        ipp_concentration_weight=concentration_weight,
-                       measurements=count, distinct_cells=len(indices), revisits=count - len(indices),
+                       measurements=count, distinct_cells=len(np.unique(indices)), revisits=count - len(np.unique(indices)),
+                       training_observations=len(indices), noise_std=noise_std,
                        rejected_moves=int(trajectory.rejected[:steps].sum()),
                        distance_total=float(np.linalg.norm(np.diff(trajectory.positions[:steps], axis=0), axis=2).sum()),
                        common_global_count=int(common.sum()), common_local_count=int((common & local).sum()),
                        initialization=name, lml=diagnostic.final_lml, **metrics,
-                       true_peak=peak.true_max, observed_max=peak.observed_max,
+                       true_peak=peak.true_max, observed_max=float(np.max(values)),
                        prediction_at_true_peak=peak.prediction_at_true_peak, predicted_max=peak.predicted_max,
                        peak_absolute_error=abs(peak.prediction_at_true_peak - peak.true_max),
                        peak_distance=peak.peak_location_error,
@@ -300,6 +319,7 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
                       f"local full={metrics['local_full_rmse']:.6g}; peak={peak.prediction_at_true_peak:.6g}", flush=True)
             tag = f"{layout.lower().replace(' ', '_')}_{count}"
             saved[tag + "_indices"] = indices
+            saved[tag + "_values"] = values
             saved[tag + "_raw_mean"] = raw.mean_field
             saved[tag + "_std"] = raw.std_field
             saved[tag + "_white_level"] = white_level
@@ -320,9 +340,9 @@ def run_informative_study(args, grid, coordinate_transform, output_path, coordin
     print(f"Saved CSV diagnostics and replay fields: {fields_path}")
     return rows, walk, common
 
-
+# Complete archived IPP maps at frozen theta/normalization, without optimization or motion.
 def refresh_informative_outputs(archive, output_dir):
-    """Complete archived IPP maps at frozen theta/normalization, without optimization or motion."""
+    
     import csv
     from pathlib import Path
     from shutil import copy2
@@ -384,9 +404,14 @@ def refresh_informative_outputs(archive, output_dir):
         missing = tag + "_raw_mean" not in data
         # Validate restoration against the first and final stored fits before trusting missing maps.
         if missing or count in (counts[0], counts[-1]):
-            indices = observations_up_to(walk, count)
+            if args.noise_std > 0:
+                indices = walk.cell_indices.ravel()[:count]
+                values = data["measured_values"].ravel()[:count]
+            else:
+                indices = observations_up_to(walk, count)
+                values = grid.field.ravel()[indices].astype(float)
             model = GaussianProcessRegressor(kernel=frozen_kernel, alpha=1e-10, optimizer=None, normalize_y=False)
-            targets = (grid.field.ravel()[indices].astype(float) - normalization[0]) / normalization[1]
+            targets = (values - normalization[0]) / normalization[1]
             model.fit(scaled[indices], targets)
             raw = reconstruct_field(grid, model, scaler, args.prediction_batch_size, "none", False,
                                     transform, tuple(normalization))
