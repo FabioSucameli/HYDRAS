@@ -16,7 +16,6 @@ localisation.
 
 - [Project Goal](#project-goal)
 - [How It Works](#how-it-works)
-- [Thesis Roadmap](#thesis-roadmap)
 - [Current Status](#current-status)
 - [Key Result](#key-result)
 - [Results Snapshot](#results-snapshot)
@@ -79,29 +78,6 @@ The current direction comes from a separate velocity dataset. Planning uses the 
 observations and marine geometry; unobserved concentrations are reserved for evaluation.
 The explicitly labelled oracle deployment is a separate control with privileged peak information.
 
----
-
-
-## Thesis Roadmap
-
-
-```mermaid
-flowchart TD
-    P1["Phase 1 - Stationary reconstruction<br/>from sparse point samples"]
-    P1B["Phase 1b - Physically informed covariance<br/>oriented by wind or current"]
-    P2["Phase 2 - Measurements collected<br/>along robot trajectories"]
-    P3["Phase 3 - Informative exploration<br/>driven by GP uncertainty"]
-    P4["Phase 4 - Pollutant source localisation"]
-
-    P1 --> P1B --> P2 --> P3 --> P4
-
-    classDef phase fill:#86cce3,stroke:#4a8ac4,stroke-width:1px,color:#000000
-    class P1,P1B,P2,P3,P4 phase
-```
-
-
-Completed results below, with noiseless measurements
-for the mobile comparisons. They establish reconstruction performance in this scenario.
 
 ---
 
@@ -138,7 +114,7 @@ Implemented:
 - **IPP and concentration-weighted IPP**, with paired random-walk controls over 100 seeds,
   round-level checkpoints, resumable runs and GIFs updated at each GP fit;
 - a four-policy comparison with **Pure Uniform**, evaluated on common complete spatial domains;
-- a sensor-noise study runner retaining independent noisy revisits;
+- a completed four-policy robustness study over 100 seeds at each sensor-noise level (0.05 and 0.10);
 - NetCDF inspection utilities.
 
 ---
@@ -418,10 +394,32 @@ peak recovery.
 
 Weighted IPP significantly enhances peak reconstruction: the mean predicted concentration at the true peak location increases from 1.648 to 2.946, nearly doubling, against a true value of 7.647. This result highlights the effectiveness of concentration-weighted informative planning in improving plume reconstruction, while indicating further potential for peak recovery.
 
-
+---
 
 ## Sensor-Noise Robustness
 
+Does informative motion still help when the sensors are noisy? We repeated the comparison
+on the same snapshot with independent, zero-mean Gaussian errors at each acquisition.
+Within a seed, policies share the same sequence of noise draws. Revisiting a cell gives a
+new noisy reading, which is retained for fitting. Errors are measured against the clean field.
+
+| Policy | No noise | σ = 0.05 | σ = 0.10 |
+|---|---:|---:|---:|
+| Random walk | 0.197 / 0.808 | 0.195 / 0.786 | 0.200 / 0.782 |
+| IPP | 0.124 / 0.705 | 0.133 / 0.730 | 0.142 / 0.734 |
+| Weighted IPP | **0.101 / 0.568** | **0.105 / 0.569** | **0.117 / 0.601** |
+| Pure Uniform | 0.125 / 0.717 | 0.132 / 0.715 | 0.142 / 0.716 |
+
+Each entry is **global / local RMSE** at 800 acquisitions, averaged over 100 seeds.
+Global covers the full marine grid; local covers the full 150 m disk around the true peak.
+Both include observed cells. The figure uses the same axes across noise levels.
+
+![Global and local RMSE versus acquisitions for four policies at three noise levels](outputs/noise_comparison.png)
+
+Weighted IPP retains the lowest mean error at both noise levels. At σ = 0.10 it beats
+unweighted IPP in 92 of 100 seeds globally and 84 locally. Peak height is more sensitive:
+its mean prediction at the true peak falls from 2.95 without noise to 2.02 at σ = 0.10,
+against a true value of 7.65. Overall, these results demonstrate that the advantage of weighted IPP persists under measurement noise, particularly in terms of field reconstruction, while accurate recovery of the peak magnitude remains an open challenge.
 
 
 ---
@@ -681,6 +679,17 @@ and use a separate directory, such as `--output-dir outputs/ipp_weighted_100seed
 To resume either run, repeat its command with `--resume`, preserving its configuration and directory.
 Resume checks experiment compatibility; it is intended for checkpoints produced by the same code
 and protocol, rather than mixing older archives with a changed implementation.
+
+### Reproduce the sensor-noise comparison
+
+Run from the repository root (100 seeds by default):
+
+```powershell
+python main.py --nc-file CL02_V1_SRC131_Conc_10mGrid.nc --time-index 729 --robot-noise-study --noise-std 0.05 --ipp-concentration-weight 0.5 --current-informed --current-average-hours 12 --n-robots 20 --n-steps 40 --robot-step 60 --length-scale-lower-bound 0.02 --length-scale-upper-bound 100 --n-restarts 0 --target-transform none --clip-negative --peak-radius 150 --peak-coordinate-unit m --prediction-batch-size 2000 --ipp-batch-size 2000 --output-dir outputs/robot_noise005_100seeds
+```
+
+For the second run, use `--noise-std 0.10` and `--output-dir outputs/robot_noise010_100seeds`.
+To continue an interrupted run, repeat its command with `--resume`.
 
 ## Command-Line Arguments
 
